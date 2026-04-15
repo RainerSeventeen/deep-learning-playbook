@@ -67,11 +67,25 @@ def check_front_matter(fm: dict, rel: str) -> list[str]:
     return []
 
 
+INLINE_MATH_RE = re.compile(r"\$\$.*?\$\$|\$[^$\n]+\$", re.DOTALL)
+
+
 def check_internal_links(body: str, file_path: Path, rel: str) -> list[str]:
     errors: list[str] = []
     file_dir = file_path.parent
+    in_math_block = False
 
     for lineno, line in enumerate(body.splitlines(), start=1):
+        # 跟踪 $$ 独占行的数学块
+        if line.strip() == "$$":
+            in_math_block = not in_math_block
+            continue
+        if in_math_block:
+            continue
+
+        # 去掉行内数学 $...$ 和 $$...$$ 再匹配链接
+        line = INLINE_MATH_RE.sub("", line)
+
         for _text, url in LINK_RE.findall(line):
             url = url.strip()
 
