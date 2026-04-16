@@ -13,8 +13,9 @@
       - 不重复存储题目文本
   - answer 文件中：
       - 文件首个 `#` 可作为文件标题
-      - 每个具体回答必须使用 `##`
-      - 第 N 个题目对应第 N 个 `##` 回答块
+      - 每个具体回答必须使用 `## N. 题目`
+      - questions.md 中题目编号必须按顺序递增
+      - 第 N 个题目必须对应第 N 个 `## N. 题目` 回答块
       - 回答块正文不能为空
 
 用法:
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +50,7 @@ ANSWER_ROOT = INTERVIEW_DIR / "answer"
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 ORDERED_LIST_RE = re.compile(r"^\s*(\d+)\.\s*(.*)$")
+ORDERED_ANSWER_HEADING_RE = re.compile(r"^(\d+)\.\s+(.+?)\s*$")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 THEMATIC_BREAK_RE = re.compile(r"^([-*_])\1{2,}$")
 
@@ -65,6 +68,7 @@ class SectionKey:
 class QuestionItem:
     key: SectionKey
     ordinal: int
+    declared_ordinal: int
     text: str
     line_no: int
 
@@ -79,6 +83,8 @@ class SectionMapping:
 @dataclass(frozen=True)
 class AnswerBlock:
     heading: str
+    ordinal: int | None
+    question_text: str | None
     start_line: int
     body_lines: tuple[str, ...]
 
@@ -114,6 +120,15 @@ def has_meaningful_content(lines: tuple[str, ...]) -> bool:
             continue
         return True
     return False
+
+
+def normalize_question_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    return "".join(
+        ch
+        for ch in normalized
+        if not ch.isspace() and not unicodedata.category(ch).startswith(("P", "S"))
+    )
 
 
 def parse_questions_md() -> tuple[dict[SectionKey, list[QuestionItem]], dict[str, list[str]], list[str]]:
@@ -169,6 +184,7 @@ def parse_questions_md() -> tuple[dict[SectionKey, list[QuestionItem]], dict[str
         if not list_match:
             continue
 
+        declared_ordinal = int(list_match.group(1))
         question_text = list_match.group(2).strip()
         if current_h2 is None:
             errors.append(
@@ -188,7 +204,20 @@ def parse_questions_md() -> tuple[dict[SectionKey, list[QuestionItem]], dict[str
 
         key = SectionKey(current_h2, current_h3)
         ordinal = len(sections.setdefault(key, [])) + 1
-        sections[key].append(QuestionItem(key=key, ordinal=ordinal, text=question_text, line_no=lineno))
+        if declared_ordinal != ordinal:
+            errors.append(
+                f"{rel(QUESTIONS_FILE)}:{lineno}: question numbering under `{key.display()}` "
+                f"must be sequential, expected `{ordinal}.` but got `{declared_ordinal}.`"
+            )
+        sections[key].append(
+            QuestionItem(
+                key=key,
+                ordinal=ordinal,
+                declared_ordinal=declared_ordinal,
+                text=question_text,
+                line_no=lineno,
+            )
+        )
 
     return sections, h2_to_h3s, errors
 
@@ -336,8 +365,11 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
         nonlocal current_heading, current_start_line, current_body
         if current_heading is None:
             return
+        ordered_heading_match = ORDERED_ANSWER_HEADING_RE.fullmatch(current_heading)
         block = AnswerBlock(
             heading=current_heading,
+            ordinal=int(ordered_heading_match.group(1)) if ordered_heading_match else None,
+            question_text=ordered_heading_match.group(2).strip() if ordered_heading_match else None,
             start_line=current_start_line,
             body_lines=tuple(current_body),
         )
@@ -363,6 +395,10 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
                     if not title:
                         errors.append(f"{rel_path}:{lineno}: empty h2 answer heading")
                         continue
+                    if not ORDERED_ANSWER_HEADING_RE.fullmatch(title):
+                        errors.append(
+                            f"{rel_path}:{lineno}: answer heading must use `## N. question` format, got `{title}`"
+                        )
                     current_heading = title
                     current_start_line = lineno
                     current_body = []
@@ -374,7 +410,7 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
     flush_current()
 
     if not blocks:
-        errors.append(f"{rel_path}: no `##` answer blocks found")
+        errors.append(f"{rel_path}: no `## N. question` answer blocks found")
         return [], errors
 
     for block in blocks:
@@ -449,11 +485,27 @@ def validate_question_answer_alignment(
         if len(question_items) != len(answer_blocks):
             errors.append(
                 f"{mapping.answer_file_rel}: `{key.display()}` has {len(question_items)} questions "
-                f"but {len(answer_blocks)} `##` answer blocks"
+                f"but {len(answer_blocks)} `## N. question` answer blocks"
             )
             continue
 
         for question, block in zip(question_items, answer_blocks, strict=True):
+            if block.ordinal != question.ordinal:
+                errors.append(
+                    f"{mapping.answer_file_rel}:{block.start_line}: `{key.display()}` question #{question.ordinal} "
+                    f"must map to `## {question.ordinal}. ...`, got `{block.heading}`"
+                )
+                continue
+
+            normalized_question = normalize_question_text(question.text)
+            normalized_answer = normalize_question_text(block.question_text or "")
+            if normalized_question != normalized_answer:
+                errors.append(
+                    f"{mapping.answer_file_rel}:{block.start_line}: `{key.display()}` question #{question.ordinal} "
+                    f"text mismatch, expected `{question.text}` but got `{block.question_text or block.heading}`"
+                )
+                continue
+
             ok_logs.append(
                 f"OK: {key.display()} / 第{question.ordinal}题 `{question.text}` -> "
                 f"{mapping.answer_file_rel} / 第{question.ordinal}个回答 `{block.heading}`"

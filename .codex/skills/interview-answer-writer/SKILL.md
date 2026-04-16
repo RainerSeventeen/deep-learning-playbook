@@ -1,6 +1,6 @@
 ---
 name: interview-answer-writer
-description: Write or update section-based interview answer notes for the deep-learning-playbook repository. Use this skill when the user gives one chapter or subsection of questions from `interview/questions.md` and wants matching answer content added under `interview/answer/`, following the concise Markdown structure and tone of `interview/answer/python/basic.md`.
+description: Write or update section-based interview answer notes for the deep-learning-playbook repository. Use this skill when the user gives one chapter or subsection of questions from `interview/questions.md` and wants matching answer content added under `interview/answer/`, following the repository's concise Markdown style and the CI-required `## 1. 题目原文` answer-heading format.
 ---
 
 # Interview Answer Writer
@@ -9,6 +9,7 @@ description: Write or update section-based interview answer notes for the deep-l
 
 Turn one chapter or subsection of interview questions into a finished answer note inside the repository.
 Mirror the repository's existing study-note style: concise, structured, easy to scan, and aligned with the question order in `interview/questions.md`.
+When formatting guidance from existing files conflicts with CI, treat `scripts/ci/check_interview_mapping.py` as the source of truth.
 
 ## Workflow
 
@@ -21,9 +22,10 @@ Always open:
 - `interview/answer/python/basic.md`
 
 Also open the target answer file if it already exists.
-Also open `scripts/ci/check_interview_mapping.py` when the task may create a new answer file or touch mappings.
+Always open `scripts/ci/check_interview_mapping.py` before editing so the current CI rules are explicit.
 
 Use `interview/answer/python/basic.md` as the formatting anchor unless a closer same-topic answer file already exists and is clearly the better match.
+Use it for tone and density, not for legacy heading syntax if that file has not yet been migrated.
 
 ### 2. Determine the output location
 
@@ -48,10 +50,19 @@ If the mapping from subsection to file is ambiguous and cannot be inferred from 
 Match the visible structure used in `interview/answer/python/basic.md`:
 
 - Use one `#` title for the subsection.
-- Use one `##` heading per question.
+- Use one `## N. 题目原文` heading per question.
 - Keep the question order identical to the source section.
+- Keep the heading number `N` strictly sequential starting from `1`.
+- Keep each heading text aligned to the source question text in the same order.
 - Separate question blocks with `---`.
 - Write in concise Chinese unless the repository context clearly requires another language.
+
+Interpret the answer heading rule strictly:
+
+- If the source question is `1. python里的函数是不是对象` then the answer heading should be `## 1. python里的函数是不是对象`.
+- Do not rewrite the heading into a summary label.
+- Do not omit the numeric prefix.
+- Do not reorder or merge questions unless the user explicitly asks for a structural rewrite.
 
 Do not turn the document into a long essay.
 Optimize for interview recall and fast review.
@@ -95,6 +106,21 @@ Avoid:
 When formulas are central, include the formula and a short explanation of each term.
 When implementation is central, include the smallest useful code sample.
 
+### 6. Run CI immediately after writing
+
+After writing or updating any interview answer file, run:
+
+- `python3 scripts/ci/check_interview_mapping.py`
+
+Treat this as a required execution step, not an optional final suggestion.
+
+Use this rule:
+
+- If you changed an answer file, run the CI check.
+- If you changed `interview/mapping.yaml`, run the CI check.
+- If CI fails, distinguish between failures caused by your edit and pre-existing unrelated failures.
+- Do not claim the task is complete until you have executed the CI check and reviewed the result.
+
 ## Formatting Checklist
 
 Before finishing, verify all of the following:
@@ -102,6 +128,9 @@ Before finishing, verify all of the following:
 - Every source question appears exactly once.
 - No source question is skipped.
 - No extra question headings were invented unless the user asked for expansion.
+- Every answer heading uses `## N. 题目原文`.
+- Answer heading numbers are strictly sequential and match the source order.
+- Answer heading text matches the corresponding source question text.
 - Heading levels are consistent with the reference file.
 - Separators and spacing match the existing answer-note style.
 - The output file lives in the intended `interview/answer/` path.
@@ -120,7 +149,8 @@ Use this decision order:
 3. Infer or confirm the target file in `interview/answer/`; if missing, add the mapping entry first.
 4. Read the reference answer style.
 5. Create or update the Markdown file.
-6. Run `python3 scripts/ci/check_interview_mapping.py` and review whether failures come from your change or from untouched sections.
+6. Immediately run `python3 scripts/ci/check_interview_mapping.py`.
+7. Review whether failures come from your change or from untouched sections.
 
 ## Output Pattern
 
@@ -129,7 +159,7 @@ Use this pattern as a guide, not as literal text:
 ```md
 # 小节标题
 
-## 问题 1
+## 1. 问题 1 原文
 
 直接回答。
 
@@ -138,7 +168,7 @@ Use this pattern as a guide, not as literal text:
 
 ---
 
-## 问题 2
+## 2. 问题 2 原文
 
 直接回答。
 

@@ -1,7 +1,33 @@
 version: 1
 sections:
-  - h2: "Python"
-    answer_dir: "interview/answer/python"
-    files:
-      - h3: "基础语法"
-        answer_file: "basic.md"
+  - h2: "一、编程与工程基础"
+    answer_dir: "interview/answer/01_engineering"
+    files: []
+
+  - h2: "二、机器学习 / 深度学习基础"
+    answer_dir: "interview/answer/02_ml_dl"
+    files: []
+
+  - h2: "三、Transformer / LLM 核心"
+    answer_dir: "interview/answer/03_transformer_llm"
+    files: []
+
+  - h2: "四、训练与适配"
+    answer_dir: "interview/answer/04_training"
+    files: []
+
+  - h2: "五、模型专题"
+    answer_dir: "interview/answer/05_models"
+    files: []
+
+  - h2: "六、RAG / Agent 应用"
+    answer_dir: "interview/answer/06_rag_agent"
+    files: []
+
+  - h2: "七、代码手撕"
+    answer_dir: "interview/answer/07_coding"
+    files: []
+
+  - h2: "八、项目经历 / 情景题"
+    answer_dir: "interview/answer/08_project"
+    files: []
