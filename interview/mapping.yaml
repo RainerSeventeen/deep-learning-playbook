@@ -1,0 +1,7 @@
+version: 1
+sections:
+  - h2: "Python"
+    answer_dir: "interview/answer/python"
+    files:
+      - h3: "基础语法"
+        answer_file: "basic.md"

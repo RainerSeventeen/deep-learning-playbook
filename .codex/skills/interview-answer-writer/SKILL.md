@@ -17,9 +17,11 @@ Mirror the repository's existing study-note style: concise, structured, easy to 
 Always open:
 
 - `interview/questions.md`
+- `interview/mapping.yaml`
 - `interview/answer/python/basic.md`
 
 Also open the target answer file if it already exists.
+Also open `scripts/ci/check_interview_mapping.py` when the task may create a new answer file or touch mappings.
 
 Use `interview/answer/python/basic.md` as the formatting anchor unless a closer same-topic answer file already exists and is clearly the better match.
 
@@ -31,6 +33,9 @@ Follow these rules:
 
 - Reuse an existing folder when the subject already has one.
 - Reuse an existing file when the subsection already maps to it.
+- Treat `interview/mapping.yaml` as the source of truth for `## -> answer_dir` and `### -> answer_file`.
+- Before creating a new answer file, check whether the `h2/h3` subsection already has a mapping entry.
+- If the mapping entry is missing, add the corresponding `h2` directory mapping and `h3` file mapping before creating the answer file.
 - If a new file is needed, choose a short lowercase filename that reflects the subsection meaning.
 - Do not reorganize the note hierarchy unless the user explicitly asks.
 - Do not modify `interview/questions.md` unless asked.
@@ -100,6 +105,8 @@ Before finishing, verify all of the following:
 - Heading levels are consistent with the reference file.
 - Separators and spacing match the existing answer-note style.
 - The output file lives in the intended `interview/answer/` path.
+- The `h2/h3` subsection exists in `interview/mapping.yaml` and points to the file you updated or created.
+- `python3 scripts/ci/check_interview_mapping.py` passes for the touched subsection, or any remaining failure is clearly identified as pre-existing unrelated debt.
 - The final Markdown is readable without needing further cleanup.
 
 ## Default Operating Mode
@@ -109,10 +116,11 @@ When this skill triggers, default to doing the repository edit directly instead 
 Use this decision order:
 
 1. Locate the source subsection in `interview/questions.md`.
-2. Infer or confirm the target file in `interview/answer/`.
-3. Read the reference answer style.
-4. Write or update the Markdown file.
-5. Run a quick self-check for question coverage and formatting consistency.
+2. Check `interview/mapping.yaml` for the subsection's `h2/h3` mapping.
+3. Infer or confirm the target file in `interview/answer/`; if missing, add the mapping entry first.
+4. Read the reference answer style.
+5. Create or update the Markdown file.
+6. Run `python3 scripts/ci/check_interview_mapping.py` and review whether failures come from your change or from untouched sections.
 
 ## Output Pattern
 
