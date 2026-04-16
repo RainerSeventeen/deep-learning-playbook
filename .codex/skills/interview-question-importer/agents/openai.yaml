@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interview Question Importer"
+  short_description: "Merge screenshot or text questions into the interview bank"
+  default_prompt: "Import interview questions from an image or text block into deep-learning-playbook `interview/questions.md`, classify them into existing sections, deduplicate them, and report added, expanded, skipped, and unmatched items."

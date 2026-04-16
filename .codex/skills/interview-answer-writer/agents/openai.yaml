@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interview Answer Writer"
+  short_description: "Write playbook interview answer notes"
+  default_prompt: "Write or update a deep-learning-playbook interview answer file for the requested section, matching the existing Markdown answer style and question order."
