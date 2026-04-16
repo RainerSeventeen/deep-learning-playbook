@@ -2,7 +2,9 @@ version: 1
 sections:
   - h2: "一、编程与工程基础"
     answer_dir: "interview/answer/01_engineering"
-    files: []
+    files:
+      - h3: "Python 基础语法"
+        answer_file: "python_basic_syntax.md"
 
   - h2: "二、机器学习 / 深度学习基础"
     answer_dir: "interview/answer/02_ml_dl"
