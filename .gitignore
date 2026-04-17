@@ -31,3 +31,5 @@ env/
 # Logs & temp
 *.log
 *.tmp
+
+.obsidian

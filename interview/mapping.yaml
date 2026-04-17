@@ -14,23 +14,69 @@ sections:
 
   - h2: "二、机器学习 / 深度学习基础"
     answer_dir: "interview/answer/02_ml_dl"
-    files: []
+    files:
+      - h3: "基础数学"
+        answer_file: "math_basics.md"
+      - h3: "损失函数与优化"
+        answer_file: "loss_optimization.md"
+      - h3: "网络基础模块"
+        answer_file: "network_basic_modules.md"
+      - h3: "经典机器学习算法"
+        answer_file: "classic_ml_algorithms.md"
 
   - h2: "三、Transformer / LLM 核心"
     answer_dir: "interview/answer/03_transformer_llm"
-    files: []
+    files:
+      - h3: "Transformer 结构与注意力"
+        answer_file: "transformer_attention.md"
+      - h3: "LLM 基础"
+        answer_file: "llm_basic.md"
 
   - h2: "四、训练与适配"
     answer_dir: "interview/answer/04_training"
-    files: []
+    files:
+      - h3: "预训练与 SFT"
+        answer_file: "pretrain_sft.md"
+      - h3: "LoRA"
+        answer_file: "lora.md"
+      - h3: "RL 对齐"
+        answer_file: "rl_alignment.md"
+      - h3: "对齐微调"
+        answer_file: "alignment_finetuning.md"
+      - h3: "量化"
+        answer_file: "quantization.md"
+      - h3: "蒸馏"
+        answer_file: "distillation.md"
 
   - h2: "五、模型专题"
     answer_dir: "interview/answer/05_models"
-    files: []
+    files:
+      - h3: "VAE"
+        answer_file: "vae.md"
+      - h3: "ViT & CLIP"
+        answer_file: "vit_clip.md"
+      - h3: "BLIP-2"
+        answer_file: "blip2.md"
+      - h3: "QwenVL"
+        answer_file: "qwenvl.md"
+      - h3: "MoE"
+        answer_file: "moe.md"
+      - h3: "CNN 与目标检测"
+        answer_file: "cnn_object_detection.md"
+      - h3: "推荐系统"
+        answer_file: "recommender_system.md"
+      - h3: "生成模型"
+        answer_file: "generative_models.md"
 
   - h2: "六、RAG / Agent 应用"
     answer_dir: "interview/answer/06_rag_agent"
-    files: []
+    files:
+      - h3: "推理 / Prompt"
+        answer_file: "reasoning_prompt.md"
+      - h3: "RAG"
+        answer_file: "rag.md"
+      - h3: "Agent 设计"
+        answer_file: "agent_design.md"
 
   - h2: "七、代码手撕"
     answer_dir: "interview/answer/07_coding"
