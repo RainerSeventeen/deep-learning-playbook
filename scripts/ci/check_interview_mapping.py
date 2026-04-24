@@ -2,21 +2,18 @@
 """
 校验 interview/questions.md、interview/mapping.yaml 和 interview/answer/ 下答案文件的映射关系。
 
-规则：
-  - questions.md 中：
-      - `##` 表示 answer 目录层级
-      - `###` 表示 answer 文件层级
-      - 所有题目必须位于 `###` 标题下
-  - mapping.yaml 中：
-      - 显式声明 `## -> answer_dir`
-      - 显式声明 `### -> answer_file`
-      - 不重复存储题目文本
-  - answer 文件中：
-      - 文件首个 `#` 可作为文件标题
-      - 每个具体回答必须使用 `## N. 题目`
-      - questions.md 中题目编号必须按顺序递增
-      - 第 N 个题目必须对应第 N 个 `## N. 题目` 回答块
-      - 回答块正文不能为空
+文件结构（version 2 flat 格式）：
+  - questions.md：
+      - `##` 表示大章节（h2）
+      - `###` 表示小节（h3），对应一个合并答案文件内的一个小节
+      - 有序列表项是具体题目
+  - mapping.yaml（version 2）：
+      - 每个 h2 对应一个 answer_file（合并后的 flat md）
+      - subsections 列出该文件内的 h3 小节名
+  - answer 文件（flat md）：
+      - `## 小节名` 作为小节分隔（对应 h3）
+      - `### N. 题目` 作为答案块（level 3 heading）
+      - 答案块正文不能为空
 
 用法:
   python3 scripts/ci/check_interview_mapping.py
@@ -44,9 +41,9 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[2]
 INTERVIEW_DIR = ROOT / "interview"
-QUESTIONS_FILE = INTERVIEW_DIR / "questions.md"
+QUESTIONS_FILE = INTERVIEW_DIR / "00_questions.md"
 MAPPING_FILE = INTERVIEW_DIR / "mapping.yaml"
-ANSWER_ROOT = INTERVIEW_DIR / "answer"
+ANSWER_ROOT = INTERVIEW_DIR
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 ORDERED_LIST_RE = re.compile(r"^\s*(\d+)\.\s*(.*)$")
@@ -96,14 +93,6 @@ def rel(path: Path) -> str:
         return path.as_posix()
 
 
-def is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def resolve_from_root(path_str: str) -> Path:
     path = Path(path_str)
     if not path.is_absolute():
@@ -130,6 +119,10 @@ def normalize_question_text(text: str) -> str:
         if not ch.isspace() and not unicodedata.category(ch).startswith(("P", "S"))
     )
 
+
+# ---------------------------------------------------------------------------
+# 解析 questions.md
+# ---------------------------------------------------------------------------
 
 def parse_questions_md() -> tuple[dict[SectionKey, list[QuestionItem]], dict[str, list[str]], list[str]]:
     errors: list[str] = []
@@ -222,10 +215,20 @@ def parse_questions_md() -> tuple[dict[SectionKey, list[QuestionItem]], dict[str
     return sections, h2_to_h3s, errors
 
 
-def parse_mapping_yaml() -> tuple[dict[SectionKey, SectionMapping], dict[str, str], list[str]]:
+# ---------------------------------------------------------------------------
+# 解析 mapping.yaml（version 2）
+# ---------------------------------------------------------------------------
+
+def parse_mapping_yaml() -> tuple[dict[SectionKey, SectionMapping], dict[str, Path | None], list[str]]:
+    """
+    返回：
+      section_map: SectionKey -> SectionMapping（h3 小节 -> 答案文件路径）
+      file_map:    h2 -> answer_file_path | None（大章节 -> 合并文件路径，None 表示尚无答案）
+      errors
+    """
     errors: list[str] = []
     section_map: dict[SectionKey, SectionMapping] = {}
-    dir_map: dict[str, str] = {}
+    file_map: dict[str, Path | None] = {}
 
     if not MAPPING_FILE.exists():
         return {}, {}, [f"{rel(MAPPING_FILE)}: file not found"]
@@ -239,8 +242,8 @@ def parse_mapping_yaml() -> tuple[dict[SectionKey, SectionMapping], dict[str, st
         return {}, {}, [f"{rel(MAPPING_FILE)}: top-level YAML value must be a mapping"]
 
     version = raw.get("version")
-    if version != 1:
-        errors.append(f"{rel(MAPPING_FILE)}: `version` must be 1")
+    if version != 2:
+        errors.append(f"{rel(MAPPING_FILE)}: `version` must be 2")
 
     sections = raw.get("sections")
     if not isinstance(sections, list):
@@ -248,7 +251,7 @@ def parse_mapping_yaml() -> tuple[dict[SectionKey, SectionMapping], dict[str, st
         return {}, {}, errors
 
     seen_h2: set[str] = set()
-    seen_target_files: dict[Path, SectionKey] = {}
+    seen_target_files: dict[Path, str] = {}
 
     for index, section in enumerate(sections, start=1):
         prefix = f"{rel(MAPPING_FILE)}: sections[{index}]"
@@ -257,8 +260,8 @@ def parse_mapping_yaml() -> tuple[dict[SectionKey, SectionMapping], dict[str, st
             continue
 
         h2 = section.get("h2")
-        answer_dir = section.get("answer_dir")
-        files = section.get("files")
+        answer_file_str = section.get("answer_file")
+        subsections = section.get("subsections")
 
         if not isinstance(h2, str) or not h2.strip():
             errors.append(f"{prefix}.h2 must be a non-empty string")
@@ -270,83 +273,80 @@ def parse_mapping_yaml() -> tuple[dict[SectionKey, SectionMapping], dict[str, st
             continue
         seen_h2.add(h2)
 
-        if not isinstance(answer_dir, str) or not answer_dir.strip():
-            errors.append(f"{prefix}.answer_dir must be a non-empty string")
+        # answer_file 可以为 null（表示该章节暂无答案文件）
+        if answer_file_str is None:
+            file_map[h2] = None
             continue
-        answer_dir = answer_dir.strip()
-        answer_dir_path = resolve_from_root(answer_dir)
-        if not is_within(answer_dir_path, ANSWER_ROOT.resolve(strict=False)):
+
+        if not isinstance(answer_file_str, str) or not answer_file_str.strip():
+            errors.append(f"{prefix}.answer_file must be a non-empty string or null")
+            continue
+        answer_file_str = answer_file_str.strip()
+        answer_file_path = resolve_from_root(answer_file_str)
+
+        try:
+            answer_file_path.relative_to(ANSWER_ROOT.resolve(strict=False))
+        except ValueError:
             errors.append(
-                f"{prefix}.answer_dir points outside `{rel(ANSWER_ROOT)}`: `{answer_dir}`"
+                f"{prefix}.answer_file points outside `{rel(ANSWER_ROOT)}`: `{answer_file_str}`"
             )
             continue
 
-        dir_map[h2] = answer_dir
+        if answer_file_path in seen_target_files:
+            errors.append(
+                f"{prefix}: duplicate answer_file `{rel(answer_file_path)}` already used by `{seen_target_files[answer_file_path]}`"
+            )
+            continue
+        seen_target_files[answer_file_path] = h2
+        file_map[h2] = answer_file_path
 
-        if not isinstance(files, list):
-            errors.append(f"{prefix}.files must be a list")
+        if not isinstance(subsections, list):
+            errors.append(f"{prefix}.subsections must be a list")
             continue
 
         seen_h3: set[str] = set()
-        for file_index, file_entry in enumerate(files, start=1):
-            file_prefix = f"{prefix}.files[{file_index}]"
-            if not isinstance(file_entry, dict):
-                errors.append(f"{file_prefix} must be a mapping")
+        for sub_index, sub in enumerate(subsections, start=1):
+            sub_prefix = f"{prefix}.subsections[{sub_index}]"
+            if not isinstance(sub, dict):
+                errors.append(f"{sub_prefix} must be a mapping")
                 continue
 
-            h3 = file_entry.get("h3")
-            answer_file = file_entry.get("answer_file")
-
+            h3 = sub.get("h3")
             if not isinstance(h3, str) or not h3.strip():
-                errors.append(f"{file_prefix}.h3 must be a non-empty string")
+                errors.append(f"{sub_prefix}.h3 must be a non-empty string")
                 continue
             h3 = h3.strip()
 
             if h3 in seen_h3:
-                errors.append(f"{file_prefix}: duplicate h3 mapping `{h2} / {h3}`")
+                errors.append(f"{sub_prefix}: duplicate h3 mapping `{h2} / {h3}`")
                 continue
             seen_h3.add(h3)
 
-            if not isinstance(answer_file, str) or not answer_file.strip():
-                errors.append(f"{file_prefix}.answer_file must be a non-empty string")
-                continue
-            answer_file = answer_file.strip()
-
-            answer_file_path = (answer_dir_path / answer_file).resolve(strict=False)
-            if not is_within(answer_file_path, answer_dir_path):
-                errors.append(
-                    f"{file_prefix}.answer_file escapes its answer_dir: `{answer_file}`"
-                )
-                continue
-            if not is_within(answer_file_path, ANSWER_ROOT.resolve(strict=False)):
-                errors.append(
-                    f"{file_prefix}.answer_file points outside `{rel(ANSWER_ROOT)}`: `{answer_file}`"
-                )
-                continue
-
             key = SectionKey(h2, h3)
-            previous_key = seen_target_files.get(answer_file_path)
-            if previous_key is not None:
-                errors.append(
-                    f"{file_prefix}: duplicate answer target `{rel(answer_file_path)}` already used by `{previous_key.display()}`"
-                )
-                continue
-            seen_target_files[answer_file_path] = key
-
             section_map[key] = SectionMapping(
                 key=key,
                 answer_file_rel=rel(answer_file_path),
                 answer_file_path=answer_file_path,
             )
 
-    return section_map, dir_map, errors
+    return section_map, file_map, errors
 
 
-def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
+# ---------------------------------------------------------------------------
+# 解析合并后的 flat answer 文件
+# ---------------------------------------------------------------------------
+
+def parse_answer_file_section(
+    path: Path, h3_name: str
+) -> tuple[list[AnswerBlock], list[str]]:
+    """
+    在合并后的 flat md 文件中，找到 `## h3_name` 小节，
+    并解析其中的 `### N. 题目` 答案块。
+    """
     errors: list[str] = []
     blocks: list[AnswerBlock] = []
-
     rel_path = rel(path)
+
     if not path.exists():
         return [], [f"{rel_path}: file not found"]
     if not path.is_file():
@@ -356,6 +356,30 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
     if not text.strip():
         return [], [f"{rel_path}: file is empty"]
 
+    lines = text.splitlines()
+
+    # 1. 找到目标 ## 小节的行范围
+    section_start: int | None = None
+    section_end: int | None = None
+
+    for i, line in enumerate(lines):
+        m = HEADING_RE.match(line)
+        if m and len(m.group(1)) == 2:
+            title = m.group(2).strip()
+            if title == h3_name:
+                section_start = i + 1  # 跳过标题行本身
+            elif section_start is not None:
+                section_end = i
+                break
+
+    if section_start is None:
+        return [], [
+            f"{rel_path}: section `## {h3_name}` not found"
+        ]
+
+    section_lines = lines[section_start:section_end]  # None 表示到文件末尾
+
+    # 2. 在小节内解析 ### N. 题目 块
     in_fence = False
     current_heading: str | None = None
     current_start_line = 0
@@ -365,11 +389,11 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
         nonlocal current_heading, current_start_line, current_body
         if current_heading is None:
             return
-        ordered_heading_match = ORDERED_ANSWER_HEADING_RE.fullmatch(current_heading)
+        ordered_match = ORDERED_ANSWER_HEADING_RE.fullmatch(current_heading)
         block = AnswerBlock(
             heading=current_heading,
-            ordinal=int(ordered_heading_match.group(1)) if ordered_heading_match else None,
-            question_text=ordered_heading_match.group(2).strip() if ordered_heading_match else None,
+            ordinal=int(ordered_match.group(1)) if ordered_match else None,
+            question_text=ordered_match.group(2).strip() if ordered_match else None,
             start_line=current_start_line,
             body_lines=tuple(current_body),
         )
@@ -378,7 +402,9 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
         current_start_line = 0
         current_body = []
 
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for offset, line in enumerate(section_lines):
+        abs_lineno = section_start + offset + 1  # 1-indexed
+
         if FENCE_RE.match(line):
             in_fence = not in_fence
             if current_heading is not None:
@@ -386,23 +412,24 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
             continue
 
         if not in_fence:
-            heading_match = HEADING_RE.match(line)
-            if heading_match:
-                level = len(heading_match.group(1))
-                title = heading_match.group(2).strip()
-                if level == 2:
+            hm = HEADING_RE.match(line)
+            if hm:
+                level = len(hm.group(1))
+                title = hm.group(2).strip()
+                if level == 3:
                     flush_current()
                     if not title:
-                        errors.append(f"{rel_path}:{lineno}: empty h2 answer heading")
+                        errors.append(f"{rel_path}:{abs_lineno}: empty h3 answer heading")
                         continue
                     if not ORDERED_ANSWER_HEADING_RE.fullmatch(title):
                         errors.append(
-                            f"{rel_path}:{lineno}: answer heading must use `## N. question` format, got `{title}`"
+                            f"{rel_path}:{abs_lineno}: answer heading must use `### N. question` format, got `{title}`"
                         )
                     current_heading = title
-                    current_start_line = lineno
+                    current_start_line = abs_lineno
                     current_body = []
                     continue
+                # level 1/2/4+ 在小节内直接忽略（blockquote、表格等不受影响）
 
         if current_heading is not None:
             current_body.append(line)
@@ -410,7 +437,9 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
     flush_current()
 
     if not blocks:
-        errors.append(f"{rel_path}: no `## N. question` answer blocks found")
+        errors.append(
+            f"{rel_path}: section `## {h3_name}` has no `### N. question` answer blocks"
+        )
         return [], errors
 
     for block in blocks:
@@ -422,41 +451,46 @@ def parse_answer_file(path: Path) -> tuple[list[AnswerBlock], list[str]]:
     return blocks, errors
 
 
+# ---------------------------------------------------------------------------
+# 校验映射与结构
+# ---------------------------------------------------------------------------
+
 def validate_structure_mapping(
     questions: dict[SectionKey, list[QuestionItem]],
     question_tree: dict[str, list[str]],
     mappings: dict[SectionKey, SectionMapping],
-    dir_map: dict[str, str],
+    file_map: dict[str, Path | None],
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
     question_h2s = set(question_tree)
-    mapped_h2s = set(dir_map)
+    mapped_h2s = set(file_map)
 
     for h2 in sorted(question_h2s - mapped_h2s):
         warnings.append(f"WARNING: {rel(MAPPING_FILE)}: missing h2 mapping for `{h2}`")
     for h2 in sorted(mapped_h2s - question_h2s):
         errors.append(f"{rel(MAPPING_FILE)}: stale h2 mapping for `{h2}`")
 
-    for h2, answer_dir in sorted(dir_map.items()):
-        answer_dir_path = resolve_from_root(answer_dir)
-        if not answer_dir_path.exists():
+    for h2, answer_file_path in sorted(file_map.items(), key=lambda x: x[0]):
+        if answer_file_path is None:
+            continue  # 显式声明无答案文件，跳过
+        if not answer_file_path.exists():
             errors.append(
-                f"{rel(MAPPING_FILE)}: answer_dir for `{h2}` does not exist: `{answer_dir}`"
+                f"{rel(MAPPING_FILE)}: answer_file for `{h2}` does not exist: `{rel(answer_file_path)}`"
             )
-        elif not answer_dir_path.is_dir():
+        elif not answer_file_path.is_file():
             errors.append(
-                f"{rel(MAPPING_FILE)}: answer_dir for `{h2}` is not a directory: `{answer_dir}`"
+                f"{rel(MAPPING_FILE)}: answer_file for `{h2}` is not a file: `{rel(answer_file_path)}`"
             )
 
     question_keys = set(questions)
     mapped_keys = set(mappings)
 
-    for key in sorted(question_keys - mapped_keys, key=lambda item: (item.h2, item.h3)):
-        warnings.append(f"WARNING: {rel(MAPPING_FILE)}: missing file mapping for `{key.display()}`")
-    for key in sorted(mapped_keys - question_keys, key=lambda item: (item.h2, item.h3)):
-        errors.append(f"{rel(MAPPING_FILE)}: stale file mapping for `{key.display()}`")
+    for key in sorted(question_keys - mapped_keys, key=lambda k: (k.h2, k.h3)):
+        warnings.append(f"WARNING: {rel(MAPPING_FILE)}: missing subsection mapping for `{key.display()}`")
+    for key in sorted(mapped_keys - question_keys, key=lambda k: (k.h2, k.h3)):
+        errors.append(f"{rel(MAPPING_FILE)}: stale subsection mapping for `{key.display()}`")
 
     return errors, warnings
 
@@ -467,16 +501,22 @@ def validate_question_answer_alignment(
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     ok_logs: list[str] = []
-    parsed_answers: dict[Path, tuple[list[AnswerBlock], list[str]]] = {}
 
-    for key in sorted(questions, key=lambda item: (item.h2, item.h3)):
+    # 缓存已解析的 (file, h3) -> blocks，避免重复读文件
+    parsed_cache: dict[tuple[Path, str], tuple[list[AnswerBlock], list[str]]] = {}
+
+    for key in sorted(questions, key=lambda k: (k.h2, k.h3)):
         mapping = mappings.get(key)
         if mapping is None:
             continue
 
-        if mapping.answer_file_path not in parsed_answers:
-            parsed_answers[mapping.answer_file_path] = parse_answer_file(mapping.answer_file_path)
-        answer_blocks, answer_errors = parsed_answers[mapping.answer_file_path]
+        cache_key = (mapping.answer_file_path, key.h3)
+        if cache_key not in parsed_cache:
+            parsed_cache[cache_key] = parse_answer_file_section(
+                mapping.answer_file_path, key.h3
+            )
+        answer_blocks, answer_errors = parsed_cache[cache_key]
+
         if answer_errors:
             errors.extend(answer_errors)
             continue
@@ -485,7 +525,7 @@ def validate_question_answer_alignment(
         if len(question_items) != len(answer_blocks):
             errors.append(
                 f"{mapping.answer_file_rel}: `{key.display()}` has {len(question_items)} questions "
-                f"but {len(answer_blocks)} `## N. question` answer blocks"
+                f"but {len(answer_blocks)} `### N. question` answer blocks"
             )
             continue
 
@@ -493,7 +533,7 @@ def validate_question_answer_alignment(
             if block.ordinal != question.ordinal:
                 errors.append(
                     f"{mapping.answer_file_rel}:{block.start_line}: `{key.display()}` question #{question.ordinal} "
-                    f"must map to `## {question.ordinal}. ...`, got `{block.heading}`"
+                    f"must map to `### {question.ordinal}. ...`, got `{block.heading}`"
                 )
                 continue
 
@@ -514,6 +554,10 @@ def validate_question_answer_alignment(
     return errors, ok_logs
 
 
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     all_errors: list[str] = []
     all_warnings: list[str] = []
@@ -521,11 +565,11 @@ def main() -> int:
     questions, question_tree, question_errors = parse_questions_md()
     all_errors.extend(question_errors)
 
-    mappings, dir_map, mapping_errors = parse_mapping_yaml()
+    mappings, file_map, mapping_errors = parse_mapping_yaml()
     all_errors.extend(mapping_errors)
 
     structure_errors, structure_warnings = validate_structure_mapping(
-        questions, question_tree, mappings, dir_map
+        questions, question_tree, mappings, file_map
     )
     all_errors.extend(structure_errors)
     all_warnings.extend(structure_warnings)

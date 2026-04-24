@@ -1,87 +1,64 @@
-version: 1
+version: 2
+# 结构说明：
+#   每个 h2 区块对应一个合并后的 answer_file（flat md）。
+#   answer_file 内用 `## h3名` 作为小节分隔，用 `### N. 题目` 作为答案块。
+#   subsections 列表声明该文件内包含哪些 h3 小节（对应 questions.md 中的 ###）。
 sections:
   - h2: "一、编程与工程基础"
-    answer_dir: "interview/answer/01_engineering"
-    files:
+    answer_file: "interview/01_engineering.md"
+    subsections:
       - h3: "Python 基础语法"
-        answer_file: "python_basic_syntax.md"
       - h3: "Python 业务与并发"
-        answer_file: "python_business_concurrency.md"
       - h3: "C++ 基础"
-        answer_file: "cpp_basic.md"
       - h3: "推理部署"
-        answer_file: "inference_deployment.md"
 
   - h2: "二、机器学习 / 深度学习基础"
-    answer_dir: "interview/answer/02_ml_dl"
-    files:
+    answer_file: "interview/02_ml_dl.md"
+    subsections:
       - h3: "基础数学"
-        answer_file: "math_basics.md"
       - h3: "损失函数与优化"
-        answer_file: "loss_optimization.md"
       - h3: "网络基础模块"
-        answer_file: "network_basic_modules.md"
       - h3: "经典机器学习算法"
-        answer_file: "classic_ml_algorithms.md"
 
   - h2: "三、Transformer / LLM 核心"
-    answer_dir: "interview/answer/03_transformer_llm"
-    files:
+    answer_file: "interview/03_transformer_llm.md"
+    subsections:
       - h3: "Transformer 结构与注意力"
-        answer_file: "transformer_attention.md"
       - h3: "LLM 基础"
-        answer_file: "llm_basic.md"
 
   - h2: "四、训练与适配"
-    answer_dir: "interview/answer/04_training"
-    files:
+    answer_file: "interview/04_training.md"
+    subsections:
       - h3: "预训练与 SFT"
-        answer_file: "pretrain_sft.md"
       - h3: "LoRA"
-        answer_file: "lora.md"
       - h3: "RL 对齐"
-        answer_file: "rl_alignment.md"
       - h3: "对齐微调"
-        answer_file: "alignment_finetuning.md"
       - h3: "量化"
-        answer_file: "quantization.md"
       - h3: "蒸馏"
-        answer_file: "distillation.md"
 
   - h2: "五、模型专题"
-    answer_dir: "interview/answer/05_models"
-    files:
+    answer_file: "interview/05_models.md"
+    subsections:
       - h3: "VAE"
-        answer_file: "vae.md"
       - h3: "ViT & CLIP"
-        answer_file: "vit_clip.md"
       - h3: "BLIP-2"
-        answer_file: "blip2.md"
       - h3: "QwenVL"
-        answer_file: "qwenvl.md"
       - h3: "MoE"
-        answer_file: "moe.md"
       - h3: "CNN 与目标检测"
-        answer_file: "cnn_object_detection.md"
       - h3: "推荐系统"
-        answer_file: "recommender_system.md"
       - h3: "生成模型"
-        answer_file: "generative_models.md"
 
   - h2: "六、RAG / Agent 应用"
-    answer_dir: "interview/answer/06_rag_agent"
-    files:
+    answer_file: "interview/06_rag_agent.md"
+    subsections:
       - h3: "推理 / Prompt"
-        answer_file: "reasoning_prompt.md"
       - h3: "RAG"
-        answer_file: "rag.md"
       - h3: "Agent 设计"
-        answer_file: "agent_design.md"
 
   - h2: "七、代码手撕"
-    answer_dir: "interview/answer/07_coding"
-    files: []
+    answer_file: null
+    subsections: []
 
   - h2: "八、项目经历 / 情景题"
-    answer_dir: "interview/answer/08_project"
-    files: []
+    answer_file: null
+    subsections: []
