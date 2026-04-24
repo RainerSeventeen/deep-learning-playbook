@@ -1,6 +1,8 @@
-# 基础语法
+# python
 
-## Python 里的函数是不是对象
+## 基础语法
+
+### Python 里的函数是不是对象
 
 是。Python 函数是一等公民（first-class object）：
 
@@ -13,7 +15,7 @@
 
 ---
 
-## Python 的装饰器是什么，有哪些常见的装饰器？
+### Python 的装饰器是什么，有哪些常见的装饰器？
 
 装饰器是一个**高阶函数**，接收函数作为参数，返回增强后的新函数，用 `@` 语法糖包裹，不修改原函数代码。
 
@@ -42,7 +44,7 @@ def add(a, b):
 
 ---
 
-## 全局锁（GIL）是什么，Python 中多线程有什么问题？
+### 全局锁（GIL）是什么，Python 中多线程有什么问题？
 
 **GIL（Global Interpreter Lock）** 是 CPython 解释器的一把全局互斥锁，保证同一时刻只有一个线程执行 Python 字节码。
 
@@ -55,7 +57,7 @@ def add(a, b):
 
 ---
 
-## 怎么写并行，IO 怎么写？
+### 怎么写并行，IO 怎么写？
 
 **CPU 密集型 → 多进程**
 
@@ -71,13 +73,13 @@ with Pool(4) as p:
 **IO 密集型 → 线程池或 asyncio**
 
 ```python
-# 线程池（适合调用阻塞 IO 库）
+## 线程池（适合调用阻塞 IO 库）
 from concurrent.futures import ThreadPoolExecutor
 
 with ThreadPoolExecutor(max_workers=8) as executor:
     futures = [executor.submit(fetch, url) for url in urls]
 
-# asyncio（适合大量并发 IO）
+## asyncio（适合大量并发 IO）
 import asyncio
 import aiohttp
 
@@ -93,7 +95,7 @@ async def main():
 
 ---
 
-## Python 里数据结构有哪些？
+### Python 里数据结构有哪些？
 
 | 数据结构 | 特点 |
 |----------|------|
@@ -109,7 +111,7 @@ async def main():
 
 ---
 
-## Python 里面的进程和线程有什么区别？DataLoader 中的 num_workers 你是否了解？
+### Python 里面的进程和线程有什么区别？DataLoader 中的 num_workers 你是否了解？
 
 **进程 vs 线程：**
 
@@ -127,3 +129,4 @@ async def main():
 - `num_workers=N`：启动 N 个子进程（`multiprocessing`）并行预处理数据，通过共享内存将 batch 传回主进程
 - 子进程各自独立，互不干扰，能有效避免 GIL 限制
 - 设置过大会因进程间通信和内存占用导致反效果，通常设为 **CPU 核数的一半**
+
