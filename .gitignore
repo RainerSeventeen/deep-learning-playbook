@@ -33,3 +33,7 @@ env/
 *.tmp
 
 .obsidian
+
+# Local reference materials
+references/*
+!references/README.md

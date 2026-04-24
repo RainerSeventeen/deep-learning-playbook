@@ -10,7 +10,7 @@
 - `papers/` stores model and paper reading notes, grouped by topic.
 - `interview/` stores question prompts and answer materials for interview prep.
 - `coding/` stores minimal runnable implementations and notebooks used for explanation and practice.
-- `libs/` contains external dependencies or submodules and should be changed only when the task clearly requires it.
+- `references/` stores local reference materials such as books, cloned external repos, or course assets; only `references/README.md` is intended to be tracked.
 
 ## Editing guidance
 - Preserve the repository's role as a study notebook rather than turning it into a large software project.
@@ -21,7 +21,7 @@
 ## Code and verification
 - Keep code examples minimal, readable, and educational.
 - Prefer small local checks or targeted script runs over broad test scaffolding unless the user explicitly asks for more.
-- Do not modify `libs/` submodules or vendored code without an explicit reason.
+- Do not assume content under `references/` is part of the repository source of truth unless the task explicitly targets local reference materials.
 
 ## Boundary defaults
 - Treat generated artifacts, temporary files, and local editor metadata as non-source material unless the user explicitly asks to keep them.

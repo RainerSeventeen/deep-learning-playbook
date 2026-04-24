@@ -1,6 +1,6 @@
 # Deep Learning Playbook
 
-面向深度学习 / AI 算法岗位准备的学习仓库，按「原理笔记」「论文笔记」「面试问题库」「手撕代码」四条主线组织，避免把所有内容堆进一个超长问答文件里。代码练习部分保留仓库内的最小实现，判题能力通过 `libs/pyre-code` 子模块接入。
+面向深度学习 / AI 算法岗位准备的学习仓库，按「原理笔记」「论文笔记」「面试问题库」「手撕代码」四条主线组织，避免把所有内容堆进一个超长问答文件里。代码练习部分保留仓库内的最小实现；外部仓库、PDF、课程资料统一放在本地 `references/` 中，不纳入版本管理。
 
 ## 仓库结构
 
@@ -11,8 +11,7 @@
   - `training/`：训练技术（微调、对齐、表示学习）
 - `interview/`：面试问题库
 - `coding/`：最小可运行实现（Python 脚本 + notebooks）
-- `libs/`：外部依赖与子模块，当前包含 `pyre-code` 代码判题能力
-- `references/`：外部资源索引（待补充）
+- `references/`：本地参考资料目录，仅跟踪其中的 `README.md`，其余内容默认不纳入版本管理
 
 ## 推荐学习路径
 
@@ -40,13 +39,9 @@
   - [normalization.py](coding/normalization.py)
   - [position_encoding.py](coding/position_encoding.py)
 
-## 子模块初始化
+## 外部参考资料
 
-首次克隆仓库后，如果需要使用 `pyre-code`：
-
-```bash
-git submodule update --init --recursive
-```
+仓库本身不强依赖 `references/` 下的内容；如果需要代码判题、外部书籍或课程资料，请参考 [references/README.md](references/README.md) 自行准备本地材料。
 
 ## 当前覆盖范围
 
