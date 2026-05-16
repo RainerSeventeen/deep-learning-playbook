@@ -32,6 +32,13 @@ env/
 *.log
 *.tmp
 
+# ML generated artifacts at repo root
+/dataset/
+/logs/
+/runs/
+/train/
+/*.pth
+
 .obsidian
 
 # Local reference materials
