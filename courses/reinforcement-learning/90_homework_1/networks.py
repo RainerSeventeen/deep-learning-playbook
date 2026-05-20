@@ -326,14 +326,16 @@ class BCPolicy(nn.Module):
 
     def __init__(self, state_dim: int = 4, action_dim: int = 20, hidden: int = 256):
         super().__init__()
-        # ============================================================
-        # TODO: Implement BCPolicy.__init__
-        # ============================================================
-        raise NotImplementedError("TODO: Implement BCPolicy.__init__")
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, action_dim),
+            nn.Sigmoid(),   # Sigmoid(x) in [0, 1]
+        )
+        
 
     def forward(self, state):
-        # ============================================================
-        # TODO: Implement BCPolicy.forward
-        # ============================================================
-        raise NotImplementedError("TODO: Implement BCPolicy.forward")
+        return self.net(state)
 
