@@ -265,10 +265,12 @@ class FlowMatchingSchedule:
         Returns:
             (x_t, velocity) where both have shape (B, action_dim).
         """
-        # ============================================================
-        # TODO: Implement the flow matching interpolation.
-        # ============================================================
-        raise NotImplementedError("TODO: Implement FlowMatchingSchedule.interpolate")
+        # 随机采样噪声, 计算速度
+        x0 = torch.randn_like(x1)
+        t = t.reshape(-1, 1)
+        velocity = x1 - x0
+        x_t = (1 - t) * x0 + t * x1
+        return (x_t, velocity)
 
     @torch.no_grad()
     def sample(self, model, state):
@@ -281,10 +283,20 @@ class FlowMatchingSchedule:
         Returns:
             Sampled actions, shape (B, action_dim), clamped to [0, 1].
         """
-        # ============================================================
-        # TODO: Implement sampling for flow matching.
-        # ============================================================
-        raise NotImplementedError("TODO: Implement FlowMatchingSchedule.sample")
+
+        B = state.shape[0]
+        device = state.device
+        x = torch.randn(B, self.action_dim, device=device)
+
+        dt = 1.0 / self.num_steps
+        for i in range(self.num_steps):
+            t = torch.full((B,), i * dt, device=device)
+            velocity = model(x, state, t)
+            x = x + dt * velocity
+
+        x = torch.clamp(x, 0, 1)
+        return x
+
 
 
 # ---------------------------------------------------------------------------
@@ -338,4 +350,3 @@ class BCPolicy(nn.Module):
 
     def forward(self, state):
         return self.net(state)
-

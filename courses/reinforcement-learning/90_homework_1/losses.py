@@ -46,7 +46,15 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
     Returns:
         Scalar MSE loss (mean over batch and action dimensions).
     """
-    # ============================================================
-    # TODO: Implement flow matching loss.
-    # ============================================================
-    raise NotImplementedError("TODO: Implement flow_matching_loss")
+    schedule = policy.schedule
+    model = policy.model
+
+    # 随机抽一个时间点
+    tau = torch.rand(a_batch.shape[0], device=a_batch.device)
+    
+    x_t, velocity = schedule.interpolate(a_batch, tau)
+    velocity_pred = model(x_t, s_batch, tau)
+
+    return ((velocity_pred - velocity) ** 2).mean()
+
+
