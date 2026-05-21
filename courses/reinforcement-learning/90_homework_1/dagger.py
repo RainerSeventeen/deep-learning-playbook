@@ -80,10 +80,7 @@ class DeterministicExpert:
 
         if dist < self.commit_dist: # very close to the pipe
             self._committed = True
-            # ======================================================
-            # TODO (Problem 4): Set the raw target.
-            # ======================================================
-            raise NotImplementedError
+            raw_target = float(gap1_y)
         else:
             raw_target = float(midpoint)
 
@@ -123,10 +120,37 @@ def rollout_episode(env, policy, seed, action_chunk, device):
         - env.step(np.array([action])) returns (obs, reward, terminated,
           truncated, info).
     """
-    # ============================================================
-    # TODO (Problem 4): Implement single-episode policy rollout.
-    # ============================================================
-    raise NotImplementedError("TODO: Implement rollout_episode")
+    # 1. 用 policy 运行, 用 expert 拿到 action, 记录 state 记录
+    # 2. policy 返回一个 chunk, step 的时候每次取一个 action 来执行, step_in_chunk 控制步数
+    obs, _ = env.reset(seed=seed)
+
+    det_expert = DeterministicExpert()
+    det_expert.reset()
+    
+    ep_states, ep_expert_actions = [], []
+
+    done = False
+    chunk_buf = None
+    step_in_chunk = 0
+
+    while not done:
+        # 先存专家状态和行为
+        ep_states.append(obs.copy())
+        ep_expert_actions.append(det_expert.act(obs))
+        
+        if chunk_buf is None or step_in_chunk >= EXECUTE_STEPS:
+            # 上一次 policy 的预测已经用完了, 需要重新走一轮 policy
+            state_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            # 转成内存上的 numpy list
+            chunk_buf = policy(state_t).cpu().numpy().flatten()
+            step_in_chunk = 0
+
+        action = float(np.clip(chunk_buf[step_in_chunk], 0.0, 1.0))
+        obs, _, terminated, truncated, _ = env.step(np.array([action]))
+        step_in_chunk += 1
+        done = terminated or truncated
+
+    return ep_states, ep_expert_actions
 
 
 @torch.no_grad()
@@ -160,15 +184,18 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed,
     """
     policy.eval()
     env = FlappyBirdEnv(difficulty=difficulty, pipe_speed=pipe_speed)
-    det_expert = DeterministicExpert()
     new_states, new_actions = [], []
+    
+    # 1. 重排数据的结构, 处理成 state -> [a_1, a_2, ...] 的数据结构
+    for ep in range(num_episodes):
+        ep_states, ep_expert_actions = rollout_episode(env, policy, seed + ep, action_chunk, device)
+        
+        # 按照 state 滑窗切 action chunk 大小下来
+        for i in range(len(ep_expert_actions) - action_chunk + 1):
+            new_states.append(ep_states[i])
+            new_actions.append(ep_expert_actions[i:i + action_chunk])
 
-
-    # ============================================================
-    # TODO (Problem 4): Loop over episodes, call rollout_episode,
-    #   window into (state, action_chunk) pairs, return arrays.
-    # ============================================================
-    raise NotImplementedError("TODO: Implement rollout_and_relabel")
+    return np.array(new_states, dtype=np.float32), np.array(new_actions, dtype=np.float32)
 
 
 def run_dagger(difficulty, initial_states, initial_actions, rounds,
