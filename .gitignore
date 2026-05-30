@@ -31,6 +31,8 @@ env/
 # Logs & temp
 *.log
 *.tmp
+.env
+.env.*
 
 # ML generated artifacts at repo root
 /dataset/
