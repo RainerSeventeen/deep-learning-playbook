@@ -114,16 +114,18 @@ def choose_action(
     q_table: np.ndarray, state: tuple[int, int], epsilon: float, rng: np.random.Generator
 ) -> int:
     """Select an action with epsilon-greedy exploration."""
+    # Action 是 整数 0123
+    action = greedy_action(q_table, state)
+    if rng.random() > epsilon:
+        return action
+    else:
+        return rng.integers(0, 4) # 0123
 
-
-    ### YOUR CODE HERE ###
-    pass
-    ### YOUR CODE HERE ###
 
 def greedy_action(q_table: np.ndarray, state: tuple[int, int]) -> int:
-    ### YOUR CODE HERE ###
-    pass
-    ### YOUR CODE HERE ###
+    # 注意 state 的 x,y 和 q_table 顺序
+    x, y = state
+    return np.argmax(q_table[y, x])
 
 
 
@@ -141,11 +143,21 @@ def train_q_learning(scenario: Scenario) -> tuple[np.ndarray, GridWorld]:
         state = env.start
         epsilon = epsilon_for_episode(scenario, episode_idx)
         for _ in range(scenario.horizon):
-
-
-            ### YOUR CODE HERE ###
-            pass
-            ### YOUR CODE HERE ###
+            # 1. Choose an action using ε-greedy policy.
+            action = choose_action(q_table=q_table, state=state, epsilon=epsilon, rng=rng)
+            # 2. Step the environment to obtain (st+1, rt, done).
+            next_state, reward, done = env.step(state, action)
+            # 3. Apply the Q-learning update above.
+            x, y = state
+            nx, ny = next_state
+            current = q_table[y, x, action]
+            next_best = 0.0 if done else np.max(q_table[ny, nx])
+            target = reward + scenario.gamma * next_best
+            q_table[y, x, action] = current + scenario.alpha * (target - current)
+            state = next_state
+            # 4. Terminate the episode if done is True.
+            if done:
+                break
 
 
     return q_table, env
