@@ -129,12 +129,15 @@ class PPOAgent:
         advantages = torch.zeros_like(rewards)
         gae = torch.zeros(1, device=self.device)
 
-        for t in reversed(range(T)):
-
-            ### YOUR CODE HERE ###
-
-
-            ### YOUR CODE HERE ###
+        for t in reversed(range(T)): # T-1 to 0
+            # t 是一条 trajectory 上的不同的时间点, 和 state 一一对应
+            # next_values 和 values 本质就是一个下标的错位
+            # discount 通常已包含 gamma * (1 - done), 这里额外用 dones 保证边界处不串轨迹
+            non_terminal = 1.0 - dones[t]
+            bootstrap_discount = discounts[t] * non_terminal
+            delta_t = rewards[t] + bootstrap_discount * next_values[t] - values[t]
+            gae = delta_t + bootstrap_discount * self.gae_lambda * gae
+            advantages[t] = gae
 
         returns = advantages + values
         return advantages, returns
@@ -190,13 +193,10 @@ class PPOAgent:
 
         # Compute GAE advantages
         with torch.no_grad():
-
-
-            ### YOUR CODE HERE ###
             
-                        
-            ### YOUR CODE HERE ###
-
+            values_all = self.critic(obs_all).squeeze(-1)
+            next_values_all = self.critic(next_obs_all).squeeze(-1)
+            advantages_all, returns_all = self.compute_gae(rew_all, values_all, next_values_all, disc_all, done_all)
 
             adv_std = advantages_all.std(unbiased=False)
 
@@ -237,13 +237,10 @@ class PPOAgent:
 
                 # Clipped surrogate (PPO-Clip objective) 
 
-                ### YOUR CODE HERE ###
-
-                
-                
-                
-
-                ### YOUR CODE HERE ###
+                ratio = torch.exp(new_log_prob - olp_ep)
+                surrogate1 = ratio * adv_ep
+                surrogate2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps,) * adv_ep
+                policy_loss = -torch.min(surrogate1, surrogate2).mean()
 
                 # Reverse KL to frozen reference policy:
                 # D_KL(pi_new || pi_ref) = E_old[ratio * (log pi_new - log pi_ref)]

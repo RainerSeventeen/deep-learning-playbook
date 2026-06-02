@@ -56,11 +56,10 @@ def test_clipped_surrogate_objective():
     adv_ep = torch.tensor([1.0, 1.0, -1.0], dtype=torch.float32)
     clip_eps = 0.2
 
-    ### Paste solution code for clipped surrogate (PPO-Clip objective)
-    ### The exact solution code should suffice provided self.clip_eps is changed to clip_eps
-
-
-    ###
+    ratio = torch.exp(new_log_prob - olp_ep)
+    surrogate1 = ratio * adv_ep
+    surrogate2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_ep
+    policy_loss = -torch.min(surrogate1, surrogate2).mean()
 
 
     expected_policy_loss = torch.tensor(-0.26666668, dtype=torch.float32)
