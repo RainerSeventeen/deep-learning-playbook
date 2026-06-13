@@ -125,10 +125,34 @@ class ACAgent:
         obs, action, reward, discount, next_obs = utils.to_torch(
             batch, self.device)
 
-        ### YOUR CODE HERE ###
+        with torch.no_grad():
+            next_dist = self.actor(next_obs)
+            next_action = next_dist.sample(clip=self.stddev_clip)
+            target_qs = self.critic_target(next_obs, next_action)
+            if len(target_qs) >= 2:
+                target_q1, target_q2 = random.sample(target_qs, 2)
+                next_q = torch.min(target_q1, target_q2)
+            else:
+                next_q = target_qs[0]
+            target_q = reward + discount * next_q
 
+        current_qs = self.critic(obs, action)
+        critic_loss = sum(F.mse_loss(q, target_q) for q in current_qs)
 
-        #####################
+        self.critic_opt.zero_grad(set_to_none=True)
+        critic_loss.backward()
+        self.critic_opt.step()
+
+        utils.soft_update_params(
+            self.critic,
+            self.critic_target,
+            self.critic_target_tau,
+        )
+
+        metrics["critic_loss"] = critic_loss.item()
+        metrics["target_q"] = target_q.mean().item()
+        metrics["critic_q"] = torch.stack([q.mean() for q in current_qs]).mean().item()
+
         return metrics
 
     def update_actor(self, replay_iter):
@@ -159,9 +183,18 @@ class ACAgent:
         obs, _, _, _, _ = utils.to_torch(
             batch, self.device)
 
-        ### YOUR CODE HERE ###
+        dist = self.actor(obs)
+        action = dist.sample(clip=self.stddev_clip)
+        qs = self.critic(obs, action)
+        actor_q = torch.stack(qs, dim=0).mean()
+        actor_loss = -actor_q
 
-        ######################
+        self.actor_opt.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        self.actor_opt.step()
+
+        metrics["actor_loss"] = actor_loss.item()
+        metrics["actor_q"] = actor_q.item()
 
         return metrics
 
@@ -193,10 +226,18 @@ class ACAgent:
         batch = next(replay_iter)
         obs, action, _, _, _ = utils.to_torch(batch, self.device)
 
-        ### YOUR CODE HERE ###
+        # action 是专家的行为样本, 不是概率分布
+        action_pred = self.actor(obs)    # 策略概率分布
+        # BC 让专家行为的那个概率尽可能大
+        prob = action_pred.log_prob(action) # 专家策略的对数概率
+        # 多个小行为构成一个行动, 取对数后乘法变加法, 所以求 sum 在动作维度上取到真正概率
+        # mean 对 batch 求和
+        loss = -prob.sum(-1, keepdim=True).mean()    # [B, 1]
+
+        self.actor_opt.zero_grad(set_to_none=True)
+        loss.backward()
+        self.actor_opt.step()
         
-
-        #####################
-
+        metrics["bc_loss"] = loss.item()
 
         return metrics
