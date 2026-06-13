@@ -1,0 +1,70 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Local Python environments and package artifacts
+.venv/
+venv/
+env/
+.env
+.env.*
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Hydra and experiment outputs
+/Logdir/
+/outputs/
+/multirun/
+/.hydra/
+/wandb/
+/runs/
+/logs/
+
+# Local training state and checkpoints
+/buffer/
+/checkpoints/
+/snapshots/
+/snapshot.pt
+*.ckpt
+*.pth
+*.pt
+
+# Stanford-provided homework data
+/demos/*.npz
+!/demos/README.md
+
+# Generated rollout media
+/eval_video/
+/train_video/
+*.mp4
+*.gif
+*.webm
+
+# Logger CSVs when scripts are run from the homework root
+/actor.csv
+/critic.csv
+/eval.csv
+/pretrain.csv
+/train.csv
+
+# Local OS/editor files
+.DS_Store
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.swp
+*.swo
