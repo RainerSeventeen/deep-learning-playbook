@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
+import resource
+import sys
+import time
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from multiprocessing import Pool
 from os import PathLike
 from typing import BinaryIO
@@ -9,6 +14,113 @@ from typing import BinaryIO
 import regex as re
 
 PRE_TOKEN_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+class Tokenizer:
+    def __init__(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None,
+    ) -> None:
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens or []
+        if any(not token for token in self.special_tokens):
+            raise ValueError("special tokens must not be empty")
+
+        self.token_to_id = {token: token_id for token_id, token in vocab.items()}
+        self.merge_ranks = {pair: rank for rank, pair in enumerate(merges)}
+        self.special_token_ids = {
+            token: self.token_to_id[token.encode("utf-8")] for token in self.special_tokens
+        }
+
+        special_pattern = _special_token_pattern(self.special_tokens)
+        self.special_token_pattern = (
+            re.compile(f"({special_pattern})") if special_pattern is not None else None
+        )
+        self._bpe_cache: dict[str, tuple[bytes, ...]] = {}
+
+    def _apply_bpe(self, pre_token: str) -> tuple[bytes, ...]:
+        cached = self._bpe_cache.get(pre_token)
+        if cached is not None:
+            return cached
+
+        tokens = tuple(bytes([byte]) for byte in pre_token.encode("utf-8"))
+        while len(tokens) > 1:
+            ranked_pairs = (
+                (self.merge_ranks[pair], pair)
+                for pair in zip(tokens, tokens[1:]) 
+                if pair in self.merge_ranks
+            )
+            # 排名最高且在 pre_token 出现的那个组合
+            best = min(ranked_pairs, default=None)
+            if best is None:
+                break
+
+            pair = best[1]
+            tokens = _merge_pair_in_tokens(tokens, pair, pair[0] + pair[1])
+
+        self._bpe_cache[pre_token] = tokens
+        return tokens
+
+    def encode(self, text: str) -> list[int]:
+        
+        parts = (
+            self.special_token_pattern.split(text)
+            if self.special_token_pattern is not None
+            else [text]
+        )
+
+        token_ids: list[int] = []
+        for part in parts:
+            if not part:
+                continue
+            if part in self.special_token_ids:
+                # special token 需要映射
+                token_ids.append(self.special_token_ids[part])
+                continue
+
+            for pre_token in pre_tokenize_text(part):
+                token_ids.extend(self.token_to_id[token] for token in self._apply_bpe(pre_token))
+        return token_ids
+
+    def decode(self, ids: list[int]) -> str:
+        """Decode token IDs into a UTF-8 string."""
+        return b"".join(self.vocab[token_id] for token_id in ids).decode(
+            "utf-8", errors="replace"
+        )
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        """Lazily encode chunks of text from an iterable."""
+        for text in iterable:
+            yield from self.encode(text)
+
+
+def _special_token_pattern(special_tokens: list[str]) -> str | None:
+    """对 special token 排序并构造正则 pattern"""
+    sorted_special_tokens = sorted(set(special_tokens), key=lambda token: (-len(token), token))
+    if not sorted_special_tokens:
+        return None
+    return "|".join(re.escape(token) for token in sorted_special_tokens)
+
+
+def _pre_tokenize_with_pattern(text: str, special_token_pattern: str | None) -> list[str]:
+    segments = re.split(special_token_pattern, text) if special_token_pattern else [text]
+    return [
+        match.group()
+        for segment in segments
+        for match in re.finditer(PRE_TOKEN_PAT, segment)
+    ]
+
+
+def pre_tokenize_text(
+    text: str,
+    special_tokens: list[str] | None = None,
+) -> list[str]:
+    """操作内存的 pre_tokenize 接口"""
+    special_token_pattern = _special_token_pattern(special_tokens or [])
+    return _pre_tokenize_with_pattern(text, special_token_pattern)
 
 
 def find_chunk_boundaries(
@@ -70,19 +182,13 @@ def pretokenize_chunk(
     special_token_pattern: str | None,
     input_path: str | PathLike[str],
 ) -> Counter[str]:
-    """Count pre-tokens in one byte range of the training corpus."""
+    """面向训练进程池的接口函数, 对 chunk 进行 pretokenize, 并统计总数"""
     start, end = chunk
     with open(input_path, "rb") as file:
         file.seek(start)
         text = file.read(end - start).decode("utf-8")
 
-    # 按照 special token 进一步切分 segment
-    segments = re.split(special_token_pattern, text) if special_token_pattern else [text]
-    counts: Counter[str] = Counter()
-    # 更新单词计数
-    for segment in segments:
-        counts.update(match.group() for match in re.finditer(PRE_TOKEN_PAT, segment))
-    return counts
+    return Counter(_pre_tokenize_with_pattern(text, special_token_pattern))
 
 
 def pre_tokenize(
@@ -99,9 +205,7 @@ def pre_tokenize(
 
     # 优先匹配更长的, 随后按照字典序
     sorted_special_tokens = sorted(set(special_tokens), key=lambda token: (-len(token), token))
-    special_token_pattern = (
-        "|".join(re.escape(token) for token in sorted_special_tokens) if sorted_special_tokens else None
-    )
+    special_token_pattern = _special_token_pattern(special_tokens)
 
     with open(input_path, "rb") as file:
         if sorted_special_tokens:
@@ -214,14 +318,46 @@ def train_bpe_tokenizer(
         num_process=num_process,
         special_tokens=special_tokens,
     )
-    return bpe_merge(pre_token_counts, vocab_size, special_tokens)
+    vocab, merges = bpe_merge(pre_token_counts, vocab_size, special_tokens)
+
+    return vocab, merges
 
 
 if __name__ == "__main__":
-    train_bpe_tokenizer(
-        input_path="./data/TinyStoriesV2-GPT4-valid.txt",
-        vocab_size=2000,
+    """
+    使用指令
+    sudo py-spy record \
+    --subprocesses \
+    --rate 100 \
+    -o data/benchmark/tokenizer-profile.svg \
+    -- .venv/bin/python cs336_basics/tokenizer.py
+    """
+    # 1. 在测试集上测试数据, 并记录性能信息
+    input_path = "./data/TinyStoriesV2-GPT4-train.txt"
+    input_size = os.path.getsize(input_path)
+    start_time = time.perf_counter()
+
+    vocab, merges = train_bpe_tokenizer(
+        input_path=input_path,
+        vocab_size=10000,
         desired_num_chunks=4,
         num_process=4,
         special_tokens=["<|endoftext|>"],
     )
+
+    # 统计时间参数
+    elapsed_time = time.perf_counter() - start_time
+    print("\nTokenizer training benchmark")
+    print(f"  input:            {input_path}")
+    print(f"  input size:       {input_size / 1024**2:.2f} MiB")
+    print(f"  elapsed time:     {elapsed_time:.2f} s")
+    print(f"  throughput:       {input_size / 1024**2 / elapsed_time:.2f} MiB/s")
+    print(f"  vocabulary size:  {len(vocab):,}")
+    print(f"  merges learned:   {len(merges):,}")
+
+    # 2. dump 数据并保存下来
+    os.makedirs("./data/benchmark", exist_ok=True)
+    with open("./data/benchmark/vocab_TinyStories.json", mode="w", encoding="utf-8") as f:
+        json.dump({token_id: token.hex() for token_id, token in vocab.items()}, f)
+    with open("./data/benchmark/merges_TinyStories.json", mode="w", encoding="utf-8") as f:
+        json.dump([(left.hex(), right.hex()) for left, right in merges], f)
