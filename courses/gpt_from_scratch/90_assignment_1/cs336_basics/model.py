@@ -107,3 +107,103 @@ class SwiGLU(nn.Module):
         # 不使用矩阵乘法, 需要对最后维度进行投影
         hidden = F.silu(F.linear(x, self.w1)) * F.linear(x, self.w3)
         return F.linear(hidden, self.w2)
+
+
+class RoPE(nn.Module):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+        super().__init__()
+
+        if d_k % 2 != 0:
+            raise ValueError("d_k must be an even number")
+        self.theta = theta
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+
+        # 计算 cos 和 sin 的 ik 序列
+        # theta_i_k = i * (theta ^ (-2k/d)), i 是 position, k 是 二分之一序号(从 0 开始)
+        k = torch.arange(0, d_k // 2, device=device)  # 构造 k 序号序列, 0 ~ d_k // 2 - 1
+        freq = theta ** (-2 * k / d_k)  # 构造频率序列, 注意 k 序列是从 0 开始的
+        position = torch.arange(max_seq_len, device=device)
+        theta_i_k = einops.einsum(position, freq, "i, k -> i k")
+        # 等价于利用广播 theta_i_k = position[:, None] * freq[None, :]
+
+        self.register_buffer("cos", torch.cos(theta_i_k), persistent=False)
+        self.register_buffer("sin", torch.sin(theta_i_k), persistent=False)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (..., seq_len, d_k)
+            token_positions: (..., seq_len)
+        """
+        # 1. 对 d_k 两两切分 -> (..., seq_len, d_k // 2, 2)
+        x = einops.rearrange(x, "... l (d two) -> ... l d two", two=2)
+        # 拆分向量
+        x0 = x[..., 0]
+        x1 = x[..., 1]
+        # 抽取
+        cos = self.cos[token_positions]
+        sin = self.sin[token_positions]
+        # 实际上运算不构造矩阵, 而是单独计算元素
+        out0 = x0 * cos - x1 * sin
+        out1 = x0 * sin + x1 * cos
+        out = torch.stack([out0, out1], dim=-1) # 沿着最后一个维度拼接, 并生成新的维度
+        return einops.rearrange(out, "... l d two -> ... l (d two)")
+
+
+class MulitiHeadAttention(nn.Module):
+    """多头注意力, 这里假设 QK 的 d_k 和 V 的 d_v 维度是相同的"""
+    def __init__(self, d_model, num_heads, apply_rope=False, token_positions=None,
+                theta=None, max_seq_len=None, device=None, dtype=None):
+        super().__init__()
+        self.d_model = d_model
+        if d_model % num_heads:
+            raise ValueError("d_model cannot be devided by num_heads")
+        self.d_k = d_model // num_heads
+        self.num_heads = num_heads
+        self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+
+        self.apply_rope = apply_rope
+        self.token_positions = token_positions
+        if self.apply_rope:
+            self.rope = RoPE(theta, self.d_k, max_seq_len, device)
+
+    def set_weights(self, Wq, Wk, Wv, Wo):
+        self.q_proj.set_weights(Wq)
+        self.k_proj.set_weights(Wk)
+        self.v_proj.set_weights(Wv)
+        self.o_proj.set_weights(Wo)
+
+    def forward(self, Q, K, V):
+        """ casual masked attention
+        Args:
+            Q : [" ... queries d_model"]
+            K : [" ... keys d_model"]
+            V : [" ... queries d_model"]
+        """
+        Q = self.q_proj(Q)
+        K = self.k_proj(K)
+        V = self.v_proj(V)
+        # 注意这里要将 head 的维度移动到前面去, 为了符合缩放点积的约定
+        Q = einops.rearrange(Q, "... q (n d) -> ... n q d", n=self.num_heads)
+        K = einops.rearrange(K, "... q (n d) -> ... n q d", n=self.num_heads)
+        V = einops.rearrange(V, "... q (n d) -> ... n q d", n=self.num_heads)
+
+        if self.apply_rope:
+            # RoPE 不需要应用到 V 上
+            Q = self.rope(Q, self.token_positions)
+            K = self.rope(K, self.token_positions)
+
+        # 下三角矩阵设置为 1, 不偏移 (也就是包含对角线)
+        seq_len = Q.shape[-2]
+        mask = torch.ones((seq_len, seq_len))
+        mask = torch.tril(mask, diagonal=0)
+        mask = mask.to(torch.bool)
+
+        out = F.scaled_dot_product_attention(Q, K, V, mask)
+        out = einops.rearrange(out, "... n q d -> ... q (n d)")
+        return self.o_proj(out)
+
