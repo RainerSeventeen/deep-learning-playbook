@@ -191,10 +191,9 @@ def run_multihead_self_attention_with_rope(
     """
     from cs336_basics.model import MulitiHeadAttention
     mha = MulitiHeadAttention(d_model, num_heads,
-                              apply_rope=True, token_positions=token_positions,
-                              theta=theta, max_seq_len=max_seq_len)
+                              apply_rope=True, theta=theta, max_seq_len=max_seq_len)
     mha.set_weights(q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight)
-    return mha.forward(in_features, in_features, in_features)
+    return mha.forward(in_features, in_features, in_features, token_positions=token_positions)
 
 
 
@@ -292,8 +291,10 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
-
+    from cs336_basics.model import TransformerBlock
+    blk = TransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta)
+    blk.set_weights(weights)
+    return blk.forward(in_features)
 
 def run_transformer_lm(
     vocab_size: int,
@@ -374,7 +375,19 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from cs336_basics.model import TransformerLM
+
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        theta=rope_theta,
+    )
+    model.set_weights(weights)
+    return model(in_indices)
 
 
 def run_rmsnorm(

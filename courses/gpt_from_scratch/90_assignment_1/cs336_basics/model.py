@@ -153,7 +153,7 @@ class RoPE(nn.Module):
 
 class MulitiHeadAttention(nn.Module):
     """多头注意力, 这里假设 QK 的 d_k 和 V 的 d_v 维度是相同的"""
-    def __init__(self, d_model, num_heads, apply_rope=False, token_positions=None,
+    def __init__(self, d_model, num_heads, apply_rope=False,
                 theta=None, max_seq_len=None, device=None, dtype=None):
         super().__init__()
         self.d_model = d_model
@@ -167,7 +167,6 @@ class MulitiHeadAttention(nn.Module):
         self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
 
         self.apply_rope = apply_rope
-        self.token_positions = token_positions
         if self.apply_rope:
             self.rope = RoPE(theta, self.d_k, max_seq_len, device)
 
@@ -177,12 +176,14 @@ class MulitiHeadAttention(nn.Module):
         self.v_proj.set_weights(Wv)
         self.o_proj.set_weights(Wo)
 
-    def forward(self, Q, K, V):
+    def forward(self, Q, K, V, token_positions=None):
         """ casual masked attention
         Args:
             Q : [" ... queries d_model"]
             K : [" ... keys d_model"]
             V : [" ... queries d_model"]
+            token_positions: token positions for RoPE, shape ``(..., sequence_length)``.
+                If omitted, uses consecutive positions starting at 0.
         """
         Q = self.q_proj(Q)
         K = self.k_proj(K)
@@ -194,8 +195,10 @@ class MulitiHeadAttention(nn.Module):
 
         if self.apply_rope:
             # RoPE 不需要应用到 V 上
-            Q = self.rope(Q, self.token_positions)
-            K = self.rope(K, self.token_positions)
+            if token_positions is None:
+                token_positions = torch.arange(Q.shape[-2], device=Q.device)
+            Q = self.rope(Q, token_positions)
+            K = self.rope(K, token_positions)
 
         # 下三角矩阵设置为 1, 不偏移 (也就是包含对角线)
         seq_len = Q.shape[-2]
@@ -207,3 +210,66 @@ class MulitiHeadAttention(nn.Module):
         out = einops.rearrange(out, "... n q d -> ... q (n d)")
         return self.o_proj(out)
 
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, num_heads, d_ff, max_seq_len, theta):
+        super().__init__()
+        self.rmsnorm1 = RMSNorm(d_model)
+        self.mha = MulitiHeadAttention(d_model, num_heads, True, theta, max_seq_len)
+        self.rmsnorm2 = RMSNorm(d_model)
+        self.ffn = SwiGLU(d_model, d_ff)
+
+    def set_weights(self, weights: dict[str, torch.Tensor]):
+        self.rmsnorm1.set_weights(weights["ln1.weight"])
+        self.mha.set_weights(
+            weights["attn.q_proj.weight"],
+            weights["attn.k_proj.weight"],
+            weights["attn.v_proj.weight"],
+            weights["attn.output_proj.weight"],
+        )
+        self.rmsnorm2.set_weights(weights["ln2.weight"])
+        self.ffn.set_weights(
+            weights["ffn.w1.weight"],
+            weights["ffn.w2.weight"],
+            weights["ffn.w3.weight"],
+        )
+
+    def forward(self, x):
+        feat = self.rmsnorm1(x)
+        x = x + self.mha(feat, feat, feat)
+        x = x + self.ffn(self.rmsnorm2(x))
+        return x
+
+
+class TransformerLM(nn.Module):
+    def __init__(self, vocab_size, context_length, num_layers,
+                d_model, num_heads, d_ff, theta):
+        super().__init__()
+        self.embedding = Embedding(vocab_size, d_model)
+        # Transformer blocks 堆叠
+        self.transformers = nn.ModuleList(
+            [TransformerBlock(d_model, num_heads, d_ff, context_length, theta)
+            for _ in range(num_layers)]
+        )
+        self.rmsnorm = RMSNorm(d_model)
+        self.ln = Linear(d_model, vocab_size)
+
+    def set_weights(self, weights: dict[str, torch.Tensor]):
+        self.embedding.set_weights(weights["token_embeddings.weight"])
+        for layer_idx, block in enumerate(self.transformers):
+            prefix = f"layers.{layer_idx}."
+            block_weights = {
+                key.removeprefix(prefix): value
+                for key, value in weights.items()
+                if key.startswith(prefix)
+            }
+            block.set_weights(block_weights)
+        self.rmsnorm.set_weights(weights["ln_final.weight"])
+        self.ln.set_weights(weights["lm_head.weight"])
+
+    def forward(self, x):
+        x = self.embedding(x)
+        for block in self.transformers:
+            x = block(x)
+        x = self.ln(self.rmsnorm(x))
+        return x
