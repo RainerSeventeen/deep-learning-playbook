@@ -133,6 +133,11 @@ data/
 wandb/
 test_results.xml
 *.zip
+
+# Local remote-training workflow (never commit connection configuration or helper scripts)
+.codex/
+scripts/remote/
+AGENTS.md
 cs336_assignment1_basics.pdf
 tests/_snapshots/
 
