@@ -10,6 +10,7 @@ dependencies = [
     "jaxtyping>=0.3",   # type hints for pytorch/jax/numpy
     "numpy>=2.4",
     "psutil>=7",
+    "pyyaml>=6.0",
     "pytest>=9.0",
     "pytest-timeout",
     "regex>=2026.3.32", # more powerful regex than the builtin `re` module

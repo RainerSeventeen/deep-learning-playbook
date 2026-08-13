@@ -1,0 +1,31 @@
+# Minimal 10-step smoke-test configuration.
+seed: 42
+
+model:
+  vocab_size: 256
+  context_length: 16
+  num_layers: 1
+  d_model: 32
+  num_heads: 4
+  d_ff: 64
+  theta: 10000.0
+
+optimizer:
+  name: adamw
+  lr: 0.001
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+
+training:
+  data_path: data/example_tokens.npy
+  # Every training invocation creates runs/<timestamp>/ below this directory.
+  output_dir: runs
+  batch_size: 4
+  total_i: 10
+  log_freq: 1
+  device: cpu
+
+logging:
+  level: INFO
+  console: true
