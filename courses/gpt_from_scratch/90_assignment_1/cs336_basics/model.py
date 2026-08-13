@@ -49,8 +49,11 @@ class Embedding(nn.Module):
             torch.empty((num_embeddings, embedding_dim),
                         device=device, dtype=dtype))
 
-    def set_weights(self, weight):
+    def set_weights(self, weight=None):
         with torch.no_grad():
+            if weight is None:
+                nn.init.trunc_normal_(self.matrix, mean=0.0, std=1.0, a=-3.0, b=3.0)
+                return
             self.matrix.copy_(weight)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -65,8 +68,11 @@ class RMSNorm(nn.Module):
         self.d_model = d_model
         self.gain = nn.Parameter(torch.empty(d_model, device=device, dtype=dtype))
 
-    def set_weights(self, weight):
+    def set_weights(self, weight=None):
         with torch.no_grad():
+            if weight is None:
+                nn.init.ones_(self.gain)
+                return
             self.gain.copy_(weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -97,11 +103,20 @@ class SwiGLU(nn.Module):
         self.w2 = nn.Parameter(torch.empty((d_model, d_ff), device=device, dtype=dtype))
         self.w3 = nn.Parameter(torch.empty((d_ff, d_model), device=device, dtype=dtype))
 
-    def set_weights(self, w1_weight, w2_weight, w3_weight):
+    def set_weights(self, w1_weight=None, w2_weight=None, w3_weight=None):
+        std = math.sqrt(2 / (self.d_model + self.d_ff))
         with torch.no_grad():
-            self.w1.copy_(w1_weight)
-            self.w2.copy_(w2_weight)
-            self.w3.copy_(w3_weight)
+            for weight, value in (
+                (self.w1, w1_weight),
+                (self.w2, w2_weight),
+                (self.w3, w3_weight),
+            ):
+                if value is None:
+                    nn.init.trunc_normal_(
+                        weight, mean=0.0, std=std, a=-3 * std, b=3 * std
+                    )
+                else:
+                    weight.copy_(value)
 
     def forward(self, x):
         # 不使用矩阵乘法, 需要对最后维度进行投影
@@ -170,7 +185,7 @@ class MulitiHeadAttention(nn.Module):
         if self.apply_rope:
             self.rope = RoPE(theta, self.d_k, max_seq_len, device)
 
-    def set_weights(self, Wq, Wk, Wv, Wo):
+    def set_weights(self, Wq=None, Wk=None, Wv=None, Wo=None):
         self.q_proj.set_weights(Wq)
         self.k_proj.set_weights(Wk)
         self.v_proj.set_weights(Wv)
@@ -219,7 +234,14 @@ class TransformerBlock(nn.Module):
         self.rmsnorm2 = RMSNorm(d_model)
         self.ffn = SwiGLU(d_model, d_ff)
 
-    def set_weights(self, weights: dict[str, torch.Tensor]):
+    def set_weights(self, weights: dict[str, torch.Tensor] | None = None):
+        if weights is None:
+            self.rmsnorm1.set_weights()
+            self.mha.set_weights()
+            self.rmsnorm2.set_weights()
+            self.ffn.set_weights()
+            return
+
         self.rmsnorm1.set_weights(weights["ln1.weight"])
         self.mha.set_weights(
             weights["attn.q_proj.weight"],
@@ -254,7 +276,15 @@ class TransformerLM(nn.Module):
         self.rmsnorm = RMSNorm(d_model)
         self.ln = Linear(d_model, vocab_size)
 
-    def set_weights(self, weights: dict[str, torch.Tensor]):
+    def set_weights(self, weights: dict[str, torch.Tensor] | None = None):
+        if weights is None:
+            self.embedding.set_weights()
+            for block in self.transformers:
+                block.set_weights()
+            self.rmsnorm.set_weights()
+            self.ln.set_weights()
+            return
+
         self.embedding.set_weights(weights["token_embeddings.weight"])
         for layer_idx, block in enumerate(self.transformers):
             prefix = f"layers.{layer_idx}."
