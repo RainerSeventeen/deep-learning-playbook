@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import heapq
 import os
 import resource
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator
 from multiprocessing import Pool
 from os import PathLike
@@ -191,11 +192,16 @@ def pretokenize_chunk(
     return Counter(_pre_tokenize_with_pattern(text, special_token_pattern))
 
 
+def _pretokenize_task(args: tuple[tuple[int, int], str | None, str | PathLike[str]]) -> Counter[str]:
+    return pretokenize_chunk(*args)
+
+
 def pre_tokenize(
     input_path: str | PathLike[str],
     desired_num_chunks: int,
     num_process: int,
     special_tokens: list[str],
+    show_progress: bool = False,
 ) -> Counter[str]:
     """Pre-tokenize a corpus and return the frequency of each pre-token."""
     if desired_num_chunks <= 0:
@@ -225,7 +231,17 @@ def pre_tokenize(
         results = [pretokenize_chunk(*args[0])]
     else:
         with Pool(processes=worker_count) as pool:
-            results = pool.starmap(pretokenize_chunk, args)
+            iterator = pool.imap(_pretokenize_task, args)
+            if show_progress:
+                from tqdm import tqdm
+
+                iterator = tqdm(
+                    iterator,
+                    total=len(args),
+                    desc="Pre-tokenizing OWT",
+                    unit="chunk",
+                )
+            results = list(iterator)
 
     total: Counter[str] = Counter()
     for result in results:
@@ -252,10 +268,33 @@ def _merge_pair_in_tokens(
     return tuple(result)
 
 
+def _count_token_pairs(tokens: tuple[bytes, ...], count: int) -> Counter[tuple[bytes, bytes]]:
+    """Count adjacent pairs in one word type, weighted by its corpus frequency."""
+    return Counter({pair: occurrences * count for pair, occurrences in Counter(zip(tokens, tokens[1:])).items()})
+
+
+class _ReversePair:
+    """Heap key that makes bytes pairs resolve in descending lexicographic order."""
+
+    __slots__ = ("pair",)
+
+    def __init__(self, pair: tuple[bytes, bytes]) -> None:
+        self.pair = pair
+
+    def __lt__(self, other: _ReversePair) -> bool:
+        return self.pair > other.pair
+
+
+def _push_pair(pair_heap: list[tuple[int, _ReversePair]], pair: tuple[bytes, bytes], count: int) -> None:
+    if count > 0:
+        heapq.heappush(pair_heap, (-count, _ReversePair(pair)))
+
+
 def bpe_merge(
     pre_token_counts: Counter[str],
     vocab_size: int,
     special_tokens: list[str],
+    show_progress: bool = False,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Train byte-level BPE merges from pre-token frequencies."""
     if len(set(special_tokens)) != len(special_tokens):
@@ -274,32 +313,81 @@ def bpe_merge(
         byte_tokens = tuple(bytes([byte]) for byte in word.encode("utf-8"))
         word_counts[byte_tokens] += count # 初始 byte 组合与计数
 
+    pair_counts: Counter[tuple[bytes, bytes]] = Counter()
+    pair_to_words: defaultdict[tuple[bytes, bytes], set[tuple[bytes, ...]]] = defaultdict(set)
+    for tokens, count in word_counts.items():
+        token_pairs = _count_token_pairs(tokens, count)
+        pair_counts.update(token_pairs)
+        for pair in token_pairs:
+            pair_to_words[pair].add(tokens)
+
+    pair_heap: list[tuple[int, _ReversePair]] = []
+    for pair, count in pair_counts.items():
+        _push_pair(pair_heap, pair, count)
+
     merges: list[tuple[bytes, bytes]] = []
     number_of_merges = vocab_size - minimum_vocab_size
 
-    for _ in range(number_of_merges):
-        pair_counts: Counter[tuple[bytes, bytes]] = Counter()
-        for tokens, count in word_counts.items():
-            for left, right in zip(tokens, tokens[1:]):
-                pair_counts[(left, right)] += count
+    progress = None
+    if show_progress:
+        from tqdm import tqdm
 
-        if not pair_counts:
+        progress = tqdm(total=number_of_merges, desc="BPE merges", unit="merge")
+
+    for _ in range(number_of_merges):
+        while pair_heap and pair_counts.get(pair_heap[0][1].pair, 0) != -pair_heap[0][0]:
+            heapq.heappop(pair_heap)
+        if not pair_heap:
             break
 
-        pair = max(pair_counts, key=lambda candidate: (pair_counts[candidate], candidate))
+        pair = heapq.heappop(pair_heap)[1].pair
+        affected_words = tuple(pair_to_words[pair])
         merged_token = pair[0] + pair[1]    # 需要合并的 token 对
         merges.append(pair)
         vocab_values.append(merged_token) # 增加一个 bpe 合并的词进去
 
-        updated_word_counts: Counter[tuple[bytes, ...]] = Counter() # 扩充后词表, 单位是 pretoken 的 byte 元组
-        for tokens, count in word_counts.items():
-            if any(left == pair[0] and right == pair[1] for left, right in zip(tokens, tokens[1:])):
-                tokens = _merge_pair_in_tokens(tokens, pair, merged_token)
-            updated_word_counts[tokens] += count
-        word_counts = updated_word_counts
+        # Only words containing the selected pair can change the next iteration's
+        # pair frequencies. Updating those contributions avoids a full recount.
+        pair_deltas: Counter[tuple[bytes, bytes]] = Counter()
+        for tokens in affected_words:
+            count = word_counts.pop(tokens)
+            old_pairs = _count_token_pairs(tokens, count)
+            new_tokens = _merge_pair_in_tokens(tokens, pair, merged_token)
+            new_pairs = _count_token_pairs(new_tokens, count)
+            pair_deltas.subtract(old_pairs)
+            pair_deltas.update(new_pairs)
+            for old_pair in old_pairs:
+                pair_to_words[old_pair].discard(tokens)
+            for new_pair in new_pairs:
+                pair_to_words[new_pair].add(new_tokens)
+            word_counts[new_tokens] += count
+
+        for candidate, delta in pair_deltas.items():
+            new_count = pair_counts[candidate] + delta
+            if new_count > 0:
+                pair_counts[candidate] = new_count
+                _push_pair(pair_heap, candidate, new_count)
+            else:
+                pair_counts.pop(candidate, None)
+                pair_to_words.pop(candidate, None)
+
+        if len(pair_heap) > max(1024, 4 * len(pair_counts)):
+            pair_heap = []
+            for candidate, count in pair_counts.items():
+                _push_pair(pair_heap, candidate, count)
+
+        if progress is not None:
+            progress.update()
+
+    if progress is not None:
+        progress.close()
+
+        # Counter.subtract retains zero-count entries, which would otherwise
+        # allow an unavailable pair to be selected when all remaining counts are zero.
+        pair_counts = Counter({candidate: count for candidate, count in pair_counts.items() if count > 0})
 
     vocab = dict(enumerate(vocab_values))
-    
+
     # vocal 指定了词表的元素, merges 确定了词表的顺序 (越靠前频率越高, encode 优先级越高, 更先合并)
     return vocab, merges
 
@@ -310,6 +398,7 @@ def train_bpe_tokenizer(
     special_tokens: list[str],
     desired_num_chunks: int = 4,
     num_process: int = 4,
+    show_progress: bool = False,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Train a byte-level BPE tokenizer vocabulary and ordered merge list."""
     pre_token_counts = pre_tokenize(
@@ -317,8 +406,9 @@ def train_bpe_tokenizer(
         desired_num_chunks=desired_num_chunks,
         num_process=num_process,
         special_tokens=special_tokens,
+        show_progress=show_progress,
     )
-    vocab, merges = bpe_merge(pre_token_counts, vocab_size, special_tokens)
+    vocab, merges = bpe_merge(pre_token_counts, vocab_size, special_tokens, show_progress=show_progress)
 
     return vocab, merges
 
