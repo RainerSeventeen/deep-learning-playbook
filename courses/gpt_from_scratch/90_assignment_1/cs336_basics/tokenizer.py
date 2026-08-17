@@ -227,10 +227,13 @@ def pre_tokenize(
 
     worker_count = min(num_process, len(chunks))
     args = [(chunk, special_token_pattern, input_path) for chunk in chunks]
+    total: Counter[str] = Counter()
     if worker_count == 1:
-        results = [pretokenize_chunk(*args[0])]
+        total.update(pretokenize_chunk(*args[0]))
     else:
-        with Pool(processes=worker_count) as pool:
+        # Recreate workers between chunks so their large temporary Counters are
+        # returned to the OS instead of accumulating across a long corpus.
+        with Pool(processes=worker_count, maxtasksperchild=1) as pool:
             iterator = pool.imap(_pretokenize_task, args)
             if show_progress:
                 from tqdm import tqdm
@@ -241,11 +244,10 @@ def pre_tokenize(
                     desc="Pre-tokenizing OWT",
                     unit="chunk",
                 )
-            results = list(iterator)
-
-    total: Counter[str] = Counter()
-    for result in results:
-        total.update(result)
+            for result in iterator:
+                # Merge each worker result immediately instead of retaining one
+                # Counter per input chunk in the parent process.
+                total.update(result)
     return total
 
 
