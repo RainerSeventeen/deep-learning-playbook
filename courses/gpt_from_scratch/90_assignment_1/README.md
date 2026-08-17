@@ -32,6 +32,27 @@ and the environment will be automatically solved and activated when necessary.
 uv run pytest
 ```
 
+### Forward inference
+
+Use the resolved `config.yml` and `checkpoint.pt` from one training run to
+reconstruct the model, encode a prompt with the same BPE files, and obtain the
+logits for every prompt token:
+
+```sh
+uv run -m cs336_basics.inference \
+  --config runs/<timestamp>/config.yml \
+  --checkpoint runs/<timestamp>/checkpoint.pt \
+  --vocab data/benchmark/vocab_TinyStories.json \
+  --merges data/benchmark/merges_TinyStories.json \
+  --special-token '<|endoftext|>' \
+  --prompt 'Once upon a time'
+```
+
+`--checkpoint`, `--vocab`, and `--merges` can instead be set in the optional
+`inference` section of the YAML config. The command reports prompt token IDs,
+the logits shape, and the argmax next-token ID. Prompts longer than
+`model.context_length` are rejected.
+
 Initially, all tests should fail with `NotImplementedError`s.
 To connect your implementation to the tests, complete the
 functions in [./tests/adapters.py](./tests/adapters.py).

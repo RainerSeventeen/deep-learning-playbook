@@ -83,14 +83,17 @@ def get_lr_cosine_schedule(
 
 
 def gradient_clipping(
-    parameters: Iterable[torch.nn.Parameter], 
+    parameters: Iterable[torch.nn.Parameter],
     max_l2_norm: float,
     eps: float = 1e-6,
 ):
-    # 注意这里是全局的 l2 范数
-    total_norm = math.sqrt(sum(p.grad.square().sum() 
-                            for p in parameters if p.grad is not None))
-    clip_coef = max_l2_norm / (total_norm + 1e-6)
-    if clip_coef < 1:
-        grad *= clip_coef
+    """Scale all gradients together when their global L2 norm is too large."""
+    gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    if not gradients:
+        return
 
+    total_norm = torch.sqrt(sum(gradient.square().sum() for gradient in gradients))
+    clip_coef = max_l2_norm / (total_norm + eps)
+    if clip_coef < 1:
+        for gradient in gradients:
+            gradient.mul_(clip_coef)

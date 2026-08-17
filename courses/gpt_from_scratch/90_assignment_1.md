@@ -273,6 +273,12 @@ For simplicity, when calculating memory usage of activations, consider only the 
 >$$
 >训练 $400{,}000$ steps 共需约 $17.46\times10^6$ s，即约 $4{,}850$ 小时、$202$ 天（约 $6.6$ 个月）。AdamW 的 $14P$ FLOPs 相对该训练计算量可忽略。
 
+### 最后训练
+
+在 TinyStory 小数据集上训练的数据如图，具体来说用来 32 的 BS 跑 40k 轮迭代
+
+![](http://oss.rainerseventeen.cn/blog/2026/202608171953576.png)
+
 ## 部分重点模块
 
 1. RoPE 的实现
