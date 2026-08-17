@@ -29,3 +29,8 @@ training:
 logging:
   level: INFO
   console: true
+
+tensorboard:
+  enabled: true
+  # Stored at runs/<timestamp>/tensorboard for each training invocation.
+  log_dir: tensorboard
