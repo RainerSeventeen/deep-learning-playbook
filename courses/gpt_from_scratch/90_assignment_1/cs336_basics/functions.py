@@ -3,7 +3,7 @@ import torch
 import math
 
 from torch import Tensor
-from jaxtyping import Bool, Float, Int
+from jaxtyping import Bool, Float
 
 class Functions:
     @staticmethod
@@ -35,7 +35,7 @@ class Functions:
         return torch.sigmoid(w1 @ x) * (w2 @ x)
     
     @staticmethod
-    def softmax(x: Tensor, dim: Tensor):
+    def softmax(x: Tensor, dim: int):
         """
         softmax(v_i) = exp(v_i) / sum(exp(v_j))
         指数很容易导致数值溢出, 为了数值稳定性会执行归一化
