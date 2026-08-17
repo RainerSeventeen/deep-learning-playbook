@@ -1,6 +1,8 @@
 # 第一次作业
 
-> 关于详细的代码实现并不在这里展示，进摘选部分问题进行回答。原作业中的大数据集的训练也相应跳过了。
+> 关于详细的代码实现并不在这里展示，进摘选部分问题进行回答。
+>
+> 原作业中的部分题目也跳过，仅保留一部分内容。
 
 ## BPE Tokenizer
 
@@ -275,8 +277,7 @@ For simplicity, when calculating memory usage of activations, consider only the 
 
 1. RoPE 的实现
 2. 归一化 softmax 为什么要归一化
-3. 如何单次计算实现多头注意力， RoPE 是怎么应用到 MHA 的， MHA 的拆分多头是怎么实现的 
-4. 交叉熵的具体实现
+3. 如何单次计算实现多头注意力， RoPE 是怎么应用到 MHA 的， MHA 的拆分多头是怎么实现的
 
 ### Cross Entropy Loss
 
