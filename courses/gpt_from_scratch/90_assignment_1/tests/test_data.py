@@ -3,6 +3,7 @@ from collections import Counter
 
 import numpy as np
 import pytest
+import torch
 
 from .adapters import run_get_batch
 
@@ -70,3 +71,17 @@ def test_get_batch():
             device="cuda:99",
         )
         assert "CUDA error" in str(excinfo.value) or "Torch not compiled with CUDA enabled" in str(excinfo.value)
+
+
+def test_get_batch_converts_uint16_token_ids_to_long():
+    dataset = np.arange(100, dtype=np.uint16)
+
+    x, y = run_get_batch(
+        dataset=dataset,
+        batch_size=2,
+        context_length=7,
+        device="cpu",
+    )
+
+    assert x.dtype == torch.long
+    assert y.dtype == torch.long

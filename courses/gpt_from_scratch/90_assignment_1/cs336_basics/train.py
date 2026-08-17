@@ -12,6 +12,7 @@ import numpy.typing as npt
 import numpy as np
 import torch
 import yaml
+from torch.utils.tensorboard import SummaryWriter
 
 from .config import load_config
 from .loss import cross_entropy
@@ -54,8 +55,8 @@ def get_batch(
     
     # 沿着外层维度构造 array, 注意到这里内层长度必须一致
     xs, ys = np.stack(xs), np.stack(ys)
-    xs = torch.tensor(xs, device=device)
-    ys = torch.tensor(ys, device=device)
+    xs = torch.as_tensor(xs, device=device, dtype=torch.long)
+    ys = torch.as_tensor(ys, device=device, dtype=torch.long)
     return xs, ys
 
 
@@ -85,11 +86,40 @@ def load_checkpoint(
     return iteration
 
 
+def evaluate(
+    model: torch.nn.Module,
+    dataset: npt.NDArray,
+    batch_size: int,
+    context_length: int,
+    device: str,
+    num_batches: int,
+) -> float:
+    """Return mean next-token cross-entropy over randomly sampled validation batches."""
+    if num_batches <= 0:
+        raise ValueError("num_batches must be positive")
+
+    was_training = model.training
+    model.eval()
+    total_loss = 0.0
+    with torch.no_grad():
+        for _ in range(num_batches):
+            x, y = get_batch(dataset, batch_size, context_length, device)
+            logits = model(x)
+            loss = cross_entropy(
+                einops.rearrange(logits, "B T V -> (B T) V"),
+                einops.rearrange(y, "B T -> (B T)"),
+            )
+            total_loss += loss.item()
+    model.train(was_training)
+    return total_loss / num_batches
+
+
 def train_loop(
     config: Mapping[str, object],
     model: torch.nn.Module,
     opti: torch.optim.Optimizer,
     logger: logging.Logger | None = None,
+    tensorboard_writer: SummaryWriter | None = None,
 ) -> int:
     """
     核心 train 循环体
@@ -109,6 +139,22 @@ def train_loop(
     bs = int(config["batch_size"])
     ctx_len = int(config["context_len"])
     device = str(config.get("device", "cpu"))
+
+    val_path = config.get("val_data_path")
+    val_dataset: npt.NDArray | None = None
+    val_freq = 0
+    val_num_batches = 0
+    val_batch_size = bs
+    checkpoint_path = config.get("checkpoint_path")
+    if val_path is not None:
+        val_freq = int(config.get("val_freq", 0))
+        val_num_batches = int(config.get("val_num_batches", 0))
+        val_batch_size = int(config.get("val_batch_size", bs))
+        if val_freq <= 0:
+            raise ValueError("val_freq must be positive when val_data_path is set")
+        if val_num_batches <= 0:
+            raise ValueError("val_num_batches must be positive when val_data_path is set")
+        val_dataset = np.load(val_path)
 
     model.to(device)
     model.train()
@@ -132,6 +178,33 @@ def train_loop(
                 print(message)
             else:
                 logger.info(message)
+            if tensorboard_writer is not None:
+                tensorboard_writer.add_scalar("loss/train", loss.item(), curr_i)
+
+        if val_dataset is not None and curr_i % val_freq == 0:
+            val_loss = evaluate(
+                model,
+                val_dataset,
+                val_batch_size,
+                ctx_len,
+                device,
+                val_num_batches,
+            )
+            message = f"Iter [{curr_i:4}] val_loss: {val_loss:.6f}"
+            if logger is None:
+                print(message)
+            else:
+                logger.info(message)
+            if tensorboard_writer is not None:
+                tensorboard_writer.add_scalar("loss/validation", val_loss, curr_i)
+
+            if checkpoint_path is not None:
+                save_checkpoint(model, opti, curr_i, checkpoint_path)
+                message = f"saved checkpoint to {checkpoint_path}"
+                if logger is None:
+                    print(message)
+                else:
+                    logger.info(message)
 
     return curr_i
 
@@ -227,6 +300,14 @@ def output_file_name(value: object | None, default: str) -> str:
     return Path(str(value)).name
 
 
+def create_tensorboard_writer(config: Mapping[str, object], run_dir: Path) -> SummaryWriter | None:
+    """Create a TensorBoard writer scoped to one training run."""
+    if not bool(config.get("enabled", True)):
+        return None
+    log_dir = run_dir / output_file_name(config.get("log_dir"), "tensorboard")
+    return SummaryWriter(log_dir=log_dir)
+
+
 def run_training(config: Mapping[str, Any]) -> int:
     """Create all training components and execute the training loop."""
     training_config = dict(config["training"])
@@ -255,10 +336,18 @@ def run_training(config: Mapping[str, Any]) -> int:
 
     logger = create_logger(logging_config)
     logger.info("run directory: %s", run_dir)
+    tensorboard_config = dict(config.get("tensorboard", {}))
+    tensorboard_writer = create_tensorboard_writer(tensorboard_config, run_dir)
+    if tensorboard_writer is not None:
+        tensorboard_writer.add_text("run/config", yaml.safe_dump(resolved_config, allow_unicode=True, sort_keys=False))
+        logger.info("TensorBoard log directory: %s", tensorboard_writer.log_dir)
+
     model = create_model(config["model"], device)
     optimizer = create_optimizer(config["optimizer"], model)
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     logger.info("device=%s parameters=%s", device, f"{parameter_count:,}")
+    if tensorboard_writer is not None:
+        tensorboard_writer.add_scalar("system/parameter_count", parameter_count, 0)
 
     # 从 save 中恢复
     resume_from = training_config.get("resume_from")
@@ -266,10 +355,15 @@ def run_training(config: Mapping[str, Any]) -> int:
         training_config["curr_i"] = load_checkpoint(resume_from, model, optimizer)
         logger.info("resumed from %s at iteration %d", resume_from, training_config["curr_i"])
 
-    final_iteration = train_loop(training_config, model, optimizer, logger)
+    try:
+        training_config["checkpoint_path"] = str(checkpoint_path)
+        final_iteration = train_loop(training_config, model, optimizer, logger, tensorboard_writer)
 
-    save_checkpoint(model, optimizer, final_iteration, checkpoint_path)
-    logger.info("saved checkpoint to %s", checkpoint_path)
+        save_checkpoint(model, optimizer, final_iteration, checkpoint_path)
+        logger.info("saved checkpoint to %s", checkpoint_path)
+    finally:
+        if tensorboard_writer is not None:
+            tensorboard_writer.close()
 
     return final_iteration
 
