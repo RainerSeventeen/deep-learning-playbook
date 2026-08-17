@@ -217,9 +217,10 @@ class MulitiHeadAttention(nn.Module):
 
         # 下三角矩阵设置为 1, 不偏移 (也就是包含对角线)
         seq_len = Q.shape[-2]
-        mask = torch.ones((seq_len, seq_len))
-        mask = torch.tril(mask, diagonal=0)
-        mask = mask.to(torch.bool)
+        mask = torch.tril(
+            torch.ones((seq_len, seq_len), device=Q.device, dtype=torch.bool),
+            diagonal=0,
+        )
 
         out = F.scaled_dot_product_attention(Q, K, V, mask)
         out = einops.rearrange(out, "... n q d -> ... q (n d)")
