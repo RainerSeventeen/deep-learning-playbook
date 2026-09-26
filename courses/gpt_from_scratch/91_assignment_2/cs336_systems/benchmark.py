@@ -17,7 +17,7 @@ from cs336_basics.optimizer import AdamW
 vocab_size = 10_000
 context_length = 512
 batch_size = 4
-model_types_to_benchmark = ("small", "medium",)
+model_types_to_benchmark = ("medium",)
 # model_types_to_benchmark = ("small", "medium", "large", "xl", "10B")
 
 benchmark_mode = "full"
@@ -44,7 +44,17 @@ def annotated_scaled_dot_product_attention(Q, K, V, mask=None):
             return einsum(attention_weights, V, "... query key, ... key d_v -> ... query d_v")
 
 
-def model_benchmark(model, step, device, warmup_steps=5, opti=None, mode="full"):
+def model_benchmark(
+    model,
+    step,
+    device,
+    warmup_steps=5,
+    opti=None,
+    mode="full",
+    autocast_dtype=None,
+    scaler=None,
+    memory_profile=False,
+):
     """构造随机数据，测量前向、反向和参数更新的端到端耗时。"""
     if step <= 0:
         raise ValueError("step 必须大于 0")
@@ -54,14 +64,31 @@ def model_benchmark(model, step, device, warmup_steps=5, opti=None, mode="full")
         raise ValueError(f"未知 mode: {mode}")
 
     device = torch.device(device)
-    # if next(model.parameters()).device != device:
-    #     raise ValueError("模型和输入必须位于同一设备")
     x = torch.randint(
         low=0,
         high=vocab_size,
         size=(batch_size, context_length),
         device=device,
     )
+    targets = x
+
+    def autocast_context():
+        if autocast_dtype is None:
+            return nullcontext()
+        return torch.autocast(device_type=device.type, dtype=autocast_dtype)
+
+    def backward(loss):
+        if scaler is None:
+            loss.backward()
+        else:
+            scaler.scale(loss).backward()
+
+    def optimizer_step():
+        if scaler is None:
+            opti.step()
+        else:
+            scaler.step(opti)
+            scaler.update()
 
     def time_operation(operation):
         # CUDA 调用异步执行；两次同步使 default_timer 测得这一操作的端到端时间。
@@ -78,16 +105,22 @@ def model_benchmark(model, step, device, warmup_steps=5, opti=None, mode="full")
         opti.zero_grad()
         if mode == "forward":
             with torch.no_grad():
-                model(x)
+                with autocast_context():
+                    model(x)
         else:
-            logits = model(x)
-            loss = cross_entropy(logits, x)
-            loss.backward()
+            with autocast_context():
+                logits = model(x)
+                loss = cross_entropy(logits, targets)
+            backward(loss)
             if mode == "full":
-                opti.step()
+                optimizer_step()
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+    # memory profile
+    if memory_profile:
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
 
     timings = {"forward": []}
     if mode != "forward":
@@ -103,22 +136,29 @@ def model_benchmark(model, step, device, warmup_steps=5, opti=None, mode="full")
                 with nvtx_range("forward", device):
                     if mode == "forward":
                         with torch.no_grad():
-                            logits, duration = time_operation(lambda: model(x))
+                            with autocast_context():
+                                logits, duration = time_operation(lambda: model(x))
                     else:
-                        logits, duration = time_operation(lambda: model(x))
+                        with autocast_context():
+                            logits, duration = time_operation(lambda: model(x))
                 timings["forward"].append(duration)
 
                 if mode != "forward":
                     with nvtx_range("loss", device):
-                        loss, _ = time_operation(lambda: cross_entropy(logits, x))
+                        with autocast_context():
+                            loss, _ = time_operation(lambda: cross_entropy(logits, targets))
                     with nvtx_range("backward", device):
-                        _, duration = time_operation(loss.backward)
+                        _, duration = time_operation(lambda: backward(loss))
                     timings["backward"].append(duration)
 
                     if mode == "full":
                         with nvtx_range("optimizer_step", device):
-                            _, duration = time_operation(opti.step)
+                            _, duration = time_operation(optimizer_step)
                         timings["optimizer_step"].append(duration)
+
+    if memory_profile:
+        torch.cuda.memory._dump_snapshot("profiles/memory_snapshot.pickle")
+        torch.cuda.memory._record_memory_history(enabled=None)
 
     summary = {
         name: {"mean": statistics.mean(values), "std": statistics.stdev(values) if len(values) > 1 else 0.0}
@@ -138,7 +178,7 @@ def render_duration(duration: float) -> str:
     if duration < 1:
         return f"{duration * 1e3:.2f}ms"
     return f"{duration:.2f}s"
-    
+
 
 if __name__ == "__main__":
     with Path(__file__).with_name("model_config.yaml").open("r", encoding="utf-8") as f:
@@ -165,6 +205,8 @@ if __name__ == "__main__":
             warmup_steps=5,
             opti=opti,
             mode=benchmark_mode,
+            memory_profile=True,
+            # autocast_dtype=torch.bfloat16
         )
         del opti, gpt_lm
         if device == "cuda":
