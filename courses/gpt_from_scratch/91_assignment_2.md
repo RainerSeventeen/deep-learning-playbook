@@ -15,8 +15,6 @@ uv run nsys profile \
   python -m cs336_systems.benchmark
 ```
 
-
-
 1. Time the forward, backward, and optimizer step for the model sizes described in Section 2.1.2. Use 5 warmup steps and compute the average and standard deviation of timings over 10 measurement steps. How long does a forward pass take? How about a backward pass? Do you see high variability across measurements, or is the standard deviation small?
 
 >```
@@ -71,7 +69,7 @@ Nsight 是 NV 用来详细检测 GPU 运行情况的库
 
 1. What is the total time spent on your forward pass? Does it match what we had measured before with the Python standard library?
 
->forward 中大致都是  48 ms（除了 step 2），和之前的同济保持一致
+>forward 中大致都是  48 ms（除了 step 2），和之前的保持一致
 
 2. What CUDA kernel takes the most cumulative GPU time during the forward pass? How many times is this kernel invoked during a single forward pass of your model? Is it the same kernel that takes the most runtime when you do both forward and backward passes? (Hint: look at the “CUDA GPU Kernel Summary” under “Stats System View”, and filter using NVTX ranges to identify which parts of the model are responsible for which kernels.)
 
@@ -238,6 +236,72 @@ Consider a Transformer with $N$ identical blocks stacked sequentially. Without a
 
    - Make sure to warm up, and to call `torch.cuda.synchronize()` after each forward/backward pass.
 
-> 1123
+   Depending on your GPU, some of these configurations are expected to run out of memory. Report the timings (or out-of-memory errors) you get for these configurations. At what size do you get out-of-memory errors? Do the accounting for the memory usage of attention in one of the smallest configurations you find that runs out of memory (you can use the equations for memory usage of Transformers from Assignment 1). How does the memory saved for backward change with the sequence length? What would you do to eliminate this memory cost?
+
+> 在 NVIDIA GeForce RTX 4090 D（24 GiB）上使用 batch size 8、FP32 测量。每个 $d$ 仅列出未显存不足的最长序列（8192）；每组预热 5 次，表中耗时为随后 100 次测量的均值；显存为 PyTorch 已分配显存，单位 MiB。
 >
-> 
+> | $d$ | 序列长度 | 前向 (ms) | 反向 (ms) | 反向前显存 (MiB) | 峰值显存 (MiB) |
+> | ---: | ---: | ---: | ---: | ---: | ---: |
+> | 16 | 8192 | 28.70 | 71.80 | 4133.00 | 12329.00 |
+> | 32 | 8192 | 28.85 | 72.05 | 4153.00 | 12353.00 |
+> | 64 | 8192 | 28.96 | 72.42 | 4193.00 | 12401.00 |
+> | 128 | 8192 | 30.13 | 73.95 | 4273.00 | 12497.00 |
+>
+> 序列长度 16384 在所有 $d$ 下均显存不足。一个 $[8,16384,16384]$ 的 FP32 注意力矩阵占 $8\times16384^2\times4=8$ GiB；分数和 softmax 权重等中间结果会进一步占用显存。反向传播需保存的注意力权重随序列长度按 $O(T^2)$ 增长。可用分块计算并在反向时重算注意力权重，避免保存完整矩阵。
+>
+
+### Benchmarking JIT-Compiled Attention
+
+#### `torch.compile`
+
+1. Extend your attention benchmarking script to include a compiled version of your PyTorch implementation of attention, and compare its performance to the uncompiled version with the same configuration as the pytorch_attention problem above. 
+
+>  NVIDIA GeForce RTX 4090 D（24 GiB）上，重新运行未编译版与 `torch.compile` 版。两者均使用 PyTorch 2.8.0+cu128、FP32、batch size 8、无多头维度；每个 $d$ 仅列出未显存不足的最长序列（8192）。每组以相同随机种子生成输入，预热 5 次后分别测量 100 次前向和反向，并在每次计时后同步 CUDA。下表为平均耗时，单位 ms；加速比为未编译耗时除以编译耗时，超过 1 表示编译版更快。编译过程发生在预热期间，不计入表中耗时。
+>
+> | $d$ | 序列长度 | 未编译前向 | 编译前向 | 前向加速比 | 未编译反向 | 编译反向 | 反向加速比 |
+> | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+> | 16 | 8192 | 28.70 | 10.63 | 2.70 | 71.80 | 30.21 | 2.38 |
+> | 32 | 8192 | 28.85 | 14.64 | 1.97 | 72.05 | 32.65 | 2.21 |
+> | 64 | 8192 | 28.96 | 10.57 | 2.74 | 72.42 | 30.69 | 2.36 |
+> | 128 | 8192 | 30.13 | 11.80 | 2.55 | 73.95 | 32.33 | 2.29 |
+>
+> 序列长度 16384 在所有 $d$ 下，两种版本均显存不足。在表中 8192 的配置下，编译版前向快 1.97～2.74 倍，反向快 2.21～2.38 倍。
+
+2. Now, compile your entire Transformer model in your end-to-end benchmarking script. How does the performance of the forward pass change? What about the combined forward and backward passes and optimizer steps?
+
+> 在 Autodl_cs336 的 RTX 4090 D 上使用 medium 模型（batch size 4、序列长度 512、FP32），分别运行未编译版和 `torch.compile` 版。两者使用相同随机种子，预热 5 步后测量 10 步。下表为平均耗时；合计不包括损失函数计算。
+>
+> | 阶段 | 未编译 (ms) | 编译 (ms) | 加速比 |
+> | --- | ---: | ---: | ---: |
+> | 前向 | 79.93 | 65.84 | 1.21 |
+> | 反向 | 163.89 | 118.73 | 1.38 |
+> | 前向与反向合计 | 243.82 | 184.57 | 1.32 |
+> | 参数更新 | 32.72 | 33.59 | 0.97 |
+> | 前向、反向与参数更新合计 | 276.53 | 218.16 | 1.27 |
+>
+> 前向耗时减少 14.09 ms（约 18%），前向与反向合计减少 59.25 ms（约 24%）。参数更新仍使用原来的 AdamW 实现，本次耗时增加 0.87 ms（约 3%）。三段合计减少 58.37 ms（约 21%），主要收益来自模型的前向和反向计算。
+
+#### Flash Attention
+
+1. Write a pure PyTorch (no Triton) `autograd.Function` that implements the FlashAttention-2 forward pass. This will be a lot slower than the regular PyTorch implementation, but will help you debug your Triton kernel.
+
+   Your implementation should take input $Q$, $K$, and $V$ as well as a flag `is_causal` and produce the output $O$ and the logsumexp value 𝐿. You can ignore the `is_causal` flag for this task. The `autograd.Function` forward should then save $L,Q,K,V,O$ for the backward pass and return $O$. Remember that the implementation of the `forward` method of `autograd.Function` always takes the context as its first parameter. Any `autograd.Function` class needs to implement a `backward` method, but for now you can make it just raise `NotImplementedError`. If you need something to compare against, you can implement Equation 4 to Equation 6 and Equation 12 in PyTorch and compare your outputs.
+
+   The interface is then `def forward(ctx, Q, K, V, is_causal=False)`. Determine your own tile sizes, but make sure they are at least of size $16 \times 16$. We will always test your code with dimensions that are powers of 2 and at least 16, so you don’t need to worry about out-of-bounds accesses.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from pathlib import Path
+import gc
 import statistics
 import timeit
 
@@ -54,34 +55,60 @@ def model_benchmark(
     autocast_dtype=None,
     scaler=None,
     memory_profile=False,
+    input=None,
+    targets=None,
+    loss_fn=cross_entropy,
+    grad_output=None,
 ):
-    """构造随机数据，测量前向、反向和参数更新的端到端耗时。"""
+    """测量前向、反向和参数更新；自定义输入可配损失函数或上游梯度。"""
     if step <= 0:
         raise ValueError("step 必须大于 0")
-    if opti is None:
+    if mode == "full" and opti is None:
         raise ValueError("空 opti")
     if mode not in {"forward", "forward_backward", "full"}:
         raise ValueError(f"未知 mode: {mode}")
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps 不能小于 0")
+    if mode != "forward" and input is not None and grad_output is None and targets is None:
+        raise ValueError("自定义 input 的反向测试需要 targets 或 grad_output")
+    if mode != "forward" and grad_output is None and loss_fn is None:
+        raise ValueError("使用 targets 时需要 loss_fn")
 
     device = torch.device(device)
-    x = torch.randint(
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    x = input if input is not None else torch.randint(
         low=0,
         high=vocab_size,
         size=(batch_size, context_length),
         device=device,
     )
-    targets = x
+    if targets is None and input is None:
+        targets = x
+    if x.device != device:
+        raise ValueError("input 必须位于指定 device")
+
+    def zero_grad():
+        if opti is not None:
+            opti.zero_grad(set_to_none=True)
+        else:
+            model.zero_grad(set_to_none=True)
+        if x.is_leaf and x.requires_grad:
+            x.grad = None
 
     def autocast_context():
         if autocast_dtype is None:
             return nullcontext()
         return torch.autocast(device_type=device.type, dtype=autocast_dtype)
 
-    def backward(loss):
+    def backward(value):
         if scaler is None:
-            loss.backward()
+            value.backward(grad_output)
         else:
-            scaler.scale(loss).backward()
+            scaler.scale(value).backward(grad_output)
+
+    def backward_value(output):
+        return output if grad_output is not None else loss_fn(output, targets)
 
     def optimizer_step():
         if scaler is None:
@@ -102,7 +129,7 @@ def model_benchmark(
 
     # warm up
     for _ in range(warmup_steps):
-        opti.zero_grad()
+        zero_grad()
         if mode == "forward":
             with torch.no_grad():
                 with autocast_context():
@@ -110,13 +137,14 @@ def model_benchmark(
         else:
             with autocast_context():
                 logits = model(x)
-                loss = cross_entropy(logits, targets)
+                loss = backward_value(logits)
             backward(loss)
             if mode == "full":
                 optimizer_step()
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
 
     # memory profile
     if memory_profile:
@@ -132,7 +160,7 @@ def model_benchmark(
     with nvtx_range("profile", device):
         for _ in range(step):
             with nvtx_range("training_step", device):
-                opti.zero_grad()
+                zero_grad()
                 with nvtx_range("forward", device):
                     if mode == "forward":
                         with torch.no_grad():
@@ -146,7 +174,7 @@ def model_benchmark(
                 if mode != "forward":
                     with nvtx_range("loss", device):
                         with autocast_context():
-                            loss, _ = time_operation(lambda: cross_entropy(logits, targets))
+                            loss, _ = time_operation(lambda: backward_value(logits))
                     with nvtx_range("backward", device):
                         _, duration = time_operation(lambda: backward(loss))
                     timings["backward"].append(duration)
@@ -188,26 +216,40 @@ if __name__ == "__main__":
     basics_model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
     for model_type in model_types_to_benchmark:
         config = model_configs[model_type]
-        print(f"\n{model_type} ({device}, context_length={context_length}, mode={benchmark_mode})")
-        gpt_lm = BasicsTransformerLM(
-            vocab_size=vocab_size,
-            context_length=context_length,
-            d_model=config["d_model"],
-            num_layers=config["num_layers"],
-            num_heads=config["num_heads"],
-            d_ff=config["d_ff"],
-        ).to(device)
-        opti = AdamW(gpt_lm.parameters())
-        model_benchmark(
-            model=gpt_lm,
-            step=10,
-            device=device,
-            warmup_steps=5,
-            opti=opti,
-            mode=benchmark_mode,
-            memory_profile=True,
-            # autocast_dtype=torch.bfloat16
-        )
-        del opti, gpt_lm
-        if device == "cuda":
-            torch.cuda.empty_cache()
+        results = {}
+        for compiled in (False, True):
+            torch.manual_seed(0)
+            label = "compiled" if compiled else "uncompiled"
+            print(f"\n{model_type} ({label}, {device}, context_length={context_length}, mode={benchmark_mode})")
+            gpt_lm = BasicsTransformerLM(
+                vocab_size=vocab_size,
+                context_length=context_length,
+                d_model=config["d_model"],
+                num_layers=config["num_layers"],
+                num_heads=config["num_heads"],
+                d_ff=config["d_ff"],
+            ).to(device)
+            if compiled:
+                gpt_lm = torch.compile(gpt_lm)
+            opti = AdamW(gpt_lm.parameters())
+            results[label] = model_benchmark(
+                model=gpt_lm,
+                step=10,
+                device=device,
+                warmup_steps=5,
+                opti=opti,
+                mode=benchmark_mode,
+            )
+            del opti, gpt_lm
+            gc.collect()
+            if device == "cuda":
+                torch.cuda.empty_cache()
+
+        for name in results["uncompiled"]:
+            eager = results["uncompiled"][name]["mean"]
+            compiled = results["compiled"][name]["mean"]
+            print(f"{name}: {render_duration(eager)} -> {render_duration(compiled)} ({eager / compiled:.2f}x)")
+        if benchmark_mode == "full":
+            eager = sum(result["mean"] for result in results["uncompiled"].values())
+            compiled = sum(result["mean"] for result in results["compiled"].values())
+            print(f"forward+backward+optimizer_step: {render_duration(eager)} -> {render_duration(compiled)} ({eager / compiled:.2f}x)")
