@@ -11,8 +11,6 @@
 
 在多卡场景中，通信开销会更加的重要
 
-
-
 ## 分布式通信 / 运算
 
 Distributed Communication / Computation
