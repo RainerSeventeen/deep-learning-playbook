@@ -2,7 +2,7 @@
 
 import triton
 import triton.language as tl
-import einops
+import math
 import torch
 
 def weighted_sum(x, weight):
@@ -59,7 +59,7 @@ def weighted_sum_fwd(
         row = tl.load(x_block_ptr, boundary_check=(0, 1), padding_option="zero") # (ROWS_TILE_SIZE, D_TILE_SIZE)
         weight = tl.load(weight_block_ptr, boundary_check=(0,), padding_option="zero") # (D_TILE_SIZE,)
 
-        output += tl.sum(row * weight[None, :], axis=1)
+        output += tl.sum(row.to(tl.float32) * weight[None, :].to(tl.float32), axis=1)
 
         # 移动指针坐标
         x_block_ptr = x_block_ptr.advance((0, D_TILE_SIZE)) # Move by D_TILE_SIZE in the last dimension
@@ -126,7 +126,7 @@ def weighted_sum_backward(
         tl.store(grad_x_block_ptr, grad_x_row, boundary_check=(0, 1))
         # Reduce as many rows as possible for the grad_weight result
         row = tl.load(x_block_ptr, boundary_check=(0, 1), padding_option="zero") # (ROWS_TILE_SIZE, D_TILE_SIZE)
-        grad_weight_row = tl.sum(row * grad_output[:, None], axis=0, keep_dims=True)
+        grad_weight_row = tl.sum(row.to(tl.float32) * grad_output[:, None].to(tl.float32), axis=0, keep_dims=True)
         tl.store(partial_grad_weight_block_ptr, grad_weight_row, boundary_check=(1,)) # Never out of bounds for dim 0
         # Move the pointers to the next tile along D
         x_block_ptr = x_block_ptr.advance((0, D_TILE_SIZE))
@@ -138,26 +138,25 @@ def weighted_sum_backward(
 class WeightedSumFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight):
-        # Cache x and weight to be used in the backward pass, when we
-        # only receive the gradient wrt. the output tensor, and
-        # need to compute the gradients wrt. x and weight.
-        D, output_dims = x.shape[-1], x.shape[:-1]
-        # Reshape input tensor to 2D
-        input_shape = x.shape
-        x = einops.rearrange(x, "... d -> (...) d")
+        if x.ndim < 1 or weight.ndim != 1 or weight.shape[0] != x.shape[-1]:
+            raise ValueError("Expected x with shape [..., D] and weight with shape [D]")
+        if not x.is_cuda or not weight.is_cuda or x.device != weight.device:
+            raise ValueError("Expected x and weight on the same CUDA device")
+        if x.dtype != weight.dtype or x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise TypeError("Expected matching float16, bfloat16, or float32 inputs")
+
+        ctx.input_shape = x.shape
+        D = x.shape[-1]
+        n_rows = math.prod(x.shape[:-1])
+        # Explicit sizes also support scalar outputs and an empty last dimension.
+        x = x.reshape(n_rows, D).contiguous()
         ctx.save_for_backward(x, weight)
-
-        assert len(weight.shape) == 1 and weight.shape[0] == D, "Dimension mismatch"
-        assert x.is_cuda and weight.is_cuda, "Expected CUDA tensors"
-        assert x.is_contiguous(), "Our pointer arithmetic will assume contiguous x"
-
-        ctx.D_TILE_SIZE = triton.next_power_of_2(D) // 16 # Roughly 16 loops through the embedding dimension
-        ctx.ROWS_TILE_SIZE = 16 # Each thread processes 16 batch elements at a time
-        ctx.input_shape = input_shape
-        # Need to initialize empty result tensor. Note that these elements are not necessarily 0!
-        y = torch.empty(output_dims, device=x.device)
-        # Launch our kernel with n instances in our 1D grid.
-        n_rows = y.numel()
+        ctx.D_TILE_SIZE = max(1, triton.next_power_of_2(max(D, 1)) // 16)
+        ctx.ROWS_TILE_SIZE = 16 # Each program processes up to 16 rows.
+        # The kernel addresses a flat output, so its row stride must be one.
+        y = torch.empty((n_rows,), device=x.device, dtype=x.dtype)
+        if n_rows == 0 or D == 0:
+            return y.zero_().view(ctx.input_shape[:-1])
         weighted_sum_fwd[(triton.cdiv(n_rows, ctx.ROWS_TILE_SIZE),)](
             x, weight,
             y,
@@ -167,16 +166,20 @@ class WeightedSumFunc(torch.autograd.Function):
             NUM_ROWS=n_rows, D=D,
             ROWS_TILE_SIZE=ctx.ROWS_TILE_SIZE, D_TILE_SIZE=ctx.D_TILE_SIZE,
         )
-        return y.view(input_shape[:-1])
+        return y.view(ctx.input_shape[:-1])
 
     @staticmethod
     def backward(ctx, grad_out):
         x, weight = ctx.saved_tensors
         ROWS_TILE_SIZE, D_TILE_SIZE = ctx.ROWS_TILE_SIZE, ctx.D_TILE_SIZE # These don't have to be the same
         n_rows, D = x.shape
+        if n_rows == 0 or D == 0:
+            return torch.zeros_like(x).view(ctx.input_shape), torch.zeros_like(weight)
+        # Upstream gradients can be multidimensional, transposed, or expanded.
+        grad_out = grad_out.reshape(n_rows).contiguous()
         # Our strategy is for each thread block to first write to a partial buffer,
         # then we reduce over this buffer to get the final gradient.
-        partial_grad_weight = torch.empty((triton.cdiv(n_rows, ROWS_TILE_SIZE), D), device=x.device, dtype=x.dtype)
+        partial_grad_weight = torch.empty((triton.cdiv(n_rows, ROWS_TILE_SIZE), D), device=x.device, dtype=torch.float32)
         grad_x = torch.empty_like(x)
         weighted_sum_backward[(triton.cdiv(n_rows, ROWS_TILE_SIZE),)](
             x, weight,
@@ -190,5 +193,5 @@ class WeightedSumFunc(torch.autograd.Function):
             NUM_ROWS=n_rows, D=D,
             ROWS_TILE_SIZE=ROWS_TILE_SIZE, D_TILE_SIZE=D_TILE_SIZE,
         )
-        grad_weight = partial_grad_weight.sum(axis=0)
-        return grad_x, grad_weight
+        grad_weight = partial_grad_weight.sum(axis=0).to(weight.dtype)
+        return grad_x.view(ctx.input_shape), grad_weight
