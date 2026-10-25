@@ -1,6 +1,6 @@
 import pytest
 import torch
-from einops import einsum, rearrange
+from einops import einsum
 
 from .adapters import (
     get_flashattention_autograd_function_pytorch,
@@ -18,7 +18,7 @@ def _attention_and_lse(q, k, v, is_causal=False):
         S = torch.where(
             torch.arange(n_queries, device=S.device)[None, :, None] >= torch.arange(n_keys, device=S.device)[None, None, :],
             S,
-            -1e6,
+            float("-inf"),
         )
     P = torch.softmax(S, dim=-1)
     o = einsum(P, v, "... q k, ... k d -> ... q d")
@@ -51,12 +51,12 @@ def _test_flash_forward_pass(impl, device="cpu", is_causal=False):
     assert len(maybe_ls) == 1, (
         f"Expected one tensor of shape {q.shape[0], q.shape[1]} in saved tensors, but found {len(maybe_ls)}. The tests require you to save exactly one tensor of this shape, corresponding to the log-sum-exp of the attention scores."
     )
-    l = maybe_ls[0]
+    lse = maybe_ls[0]
 
     o_ref, l_ref = _attention_and_lse(q, k, v, is_causal)
 
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(l, l_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(lse, l_ref, rtol=1e-2, atol=1e-2)
 
 
 def test_flash_forward_pass_pytorch():
@@ -87,6 +87,45 @@ def test_flash_backward_pytorch():
     torch.testing.assert_close(dq_expected, q.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dk_expected, k.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dv_expected, v.grad, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("is_causal", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(2, 73, 85, 16), (1, 85, 73, 64), (1, 65, 129, 128)])
+@pytest.mark.parametrize("implementation", [
+    "pytorch",
+    pytest.param("triton", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")),
+])
+def test_flash_partial_tiles(is_causal, dtype, shape, implementation):
+    """覆盖多个块、尾块及不等长 Q/K，并比较任意上游梯度。"""
+    batch, nq, nk, dim = shape
+    torch.manual_seed(42)
+    if implementation == "triton" and dtype == torch.float64:
+        pytest.skip("Triton implementation supports FP32/FP16/BF16")
+    device = "cuda" if implementation == "triton" else "cpu"
+    # 特征维非连续；上游梯度也非连续，检查内核入口的连续化处理。
+    inputs = [torch.randn(batch, n, dim * 2, device=device, dtype=dtype)[..., ::2].requires_grad_()
+              for n in (nq, nk, nk)]
+    do = torch.randn(batch, nq, dim * 2, device=device, dtype=dtype)[..., ::2]
+    # 半精度分块实现以 FP32 累加，参考实现也用 FP32 计算。
+    reference_inputs = [x.float() if dtype == torch.bfloat16 else x for x in inputs]
+    expected, _ = _attention_and_lse(*reference_inputs, is_causal)
+    impl = (get_flashattention_autograd_function_triton() if implementation == "triton"
+            else get_flashattention_autograd_function_pytorch())
+    actual = impl.apply(*inputs, is_causal)
+    expected_grads = torch.autograd.grad(expected, inputs, do.to(expected.dtype))
+    actual_grads = torch.autograd.grad(actual, inputs, do)
+    tol = 3e-2 if dtype == torch.bfloat16 else (1e-10 if dtype == torch.float64 else 1e-5)
+    torch.testing.assert_close(actual, expected.to(dtype), rtol=tol, atol=tol)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_flash_pytorch_gradcheck(is_causal):
+    inputs = [torch.randn(1, 5, 4, dtype=torch.float64, requires_grad=True) for _ in range(3)]
+    impl = get_flashattention_autograd_function_pytorch().apply
+    assert torch.autograd.gradcheck(lambda *xs: impl(*xs, is_causal), tuple(inputs))
 
 
 @pytest.mark.skipif(
