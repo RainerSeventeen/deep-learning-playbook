@@ -252,6 +252,15 @@ Consider a Transformer with $N$ identical blocks stacked sequentially. Without a
 
 ### Benchmarking JIT-Compiled Attention
 
+> 编译对比已合并到 [benchmark_flash_attention.py](91_assignment_2/cs336_systems/benchmark_flash_attention.py)，原 `flash_attention.py` 已移除。在作业目录运行：
+>
+> ```bash
+> python -m cs336_systems.benchmark_flash_attention --preset compiled --output attention_compiled.csv
+> ```
+>
+> `compiled` 配置沿用 batch size 8、FP32、无因果掩码、原序列长度列表，预热 5 次后测量 100 次，记录均值、标准差、反向前显存和峰值显存。合并后的脚本使用 `torch.autograd.grad` 计算梯度，不向输入的 `.grad` 累加；前后向合计耗时单独测量。可用 `--steps`、`--warmup-steps` 调整次数。
+
+
 #### `torch.compile`
 
 1. Extend your attention benchmarking script to include a compiled version of your PyTorch implementation of attention, and compare its performance to the uncompiled version with the same configuration as the pytorch_attention problem above. 
@@ -289,19 +298,29 @@ Consider a Transformer with $N$ identical blocks stacked sequentially. Without a
 
    The interface is then `def forward(ctx, Q, K, V, is_causal=False)`. Determine your own tile sizes, but make sure they are at least of size $16 \times 16$. We will always test your code with dimensions that are powers of 2 and at least 16, so you don’t need to worry about out-of-bounds accesses.
 
+> Flash Attention 难点主要在于 Online Softmax，详细代码参见 repo
+
+2. Write a Triton kernel for the forward pass of FlashAttention-2 following Algorithm 1. Then, write another subclass of `torch.autograd.Function` that calls this (fused) kernel in the forward pass, instead of computing the result in PyTorch. A few problem-specific tips:
+
+   - To debug, we suggest comparing the results of each Triton operation you perform with the tiled PyTorch implementation you wrote in part (a).
+
+   - Your launch grid should be set as ($T_q$,batch_size), meaning each Triton program instance will load only elements from a single batch index, and only read/write to a single query tile of $Q$, $O$, and $L$.
+   - The kernel should only have a single loop, which will iterate key tiles $1 \leq j \leq T_k$.
+   - Advance block pointers at the end of the loop.
+
+   These additional guidelines may help you avoid precision issues:
+
+   - The on chip buffers $(O_i,l,m)$ should have `dtype tl.float32`. If you’re accumulating into an output buffer, use the `acc` argument `(acc = tl.dot(..., acc=acc))`.
+
+   1. Cast $\tilde{P}_i^{(j)}$ to the dtype of $V^{(𝑗)}$ before multiplying them, and cast $O_i$ to the appropriate `dtype` before writing it to global memory. Casting is done with `tensor.to`. You can get the dtype of a tensor with `tensor.dtype`, and the dtype of a block pointer/pointer with `*_block_ptr.type.element_ty`.
 
 
+3. Add a flag as the last argument to your `autograd.Function` implementation for causal masking. This should be a boolean flag that, when set to `True`, enables an index comparison for causal masking. Your Triton kernel should have a corresponding additional parameter `is_causal: tl.constexpr` (this is a required type annotation). In Triton, construct appropriate index vectors for queries and keys, and compare them to form a square mask of size $B_q \times B_k$. For elements that are masked out, add the constant value of `-1e6` to the corresponding elements of the attention score matrix $S_i^{(j)}$. Make sure to save the mask flag for backward using `ctx.is_causal = is_causal`.
 
+> 详细代码参见具体 [作业文件](https://github.com/RainerSeventeen/deep-learning-playbook/blob/main/courses/gpt_from_scratch/91_assignment_2/cs336_systems/flash_attention_core.py)
 
+4. Write a benchmarking script using `triton.testing.do_bench` that compares the performance of your (partially) Triton implementation of FlashAttention-2 forward and backward passes with a regular PyTorch implementation (i.e., not using FlashAttention).
 
+   Specifically, you will report a table that includes latencies for forward, backward, and the end-to-end forward-backward pass, for both your Triton and PyTorch implementations. Randomly generate any necessary inputs before you start benchmarking, and run the benchmark on a single B200. Always use batch size 1 and causal masking. Sweep over the cartesian product of sequence lengths of various powers of 2 from 128 up to 65536, embedding dimension sizes of various powers of 2 from 16 up to size 128, and precisions of `torch.bfloat16` and `torch.float32`. You will likely need to adjust tile sizes depending on the input sizes.
 
-
-
-
-
-
-
-
-
-
-
+> 详细代码参见具体 [作业文件](https://github.com/RainerSeventeen/deep-learning-playbook/blob/main/courses/gpt_from_scratch/91_assignment_2/cs336_systems/benchmark_flash_attention.py)

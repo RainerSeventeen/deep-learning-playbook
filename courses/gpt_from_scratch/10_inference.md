@@ -37,6 +37,12 @@ KV Cache 对每一个 Sequence (B), token (S), layer (L), head (K) 都会存储�
 1. prefill：将所有的 prompt 输入进去并 encoder（可以并行化）
 2. generation：自回归地生成每一个 token
 
+在这个阶段，有一些方法可以应用：
+
+1. Group query attention (GQA) 来让多个 Q 共享 KV，减少内存占用，加快运算过程。
+2. Multi-head latent attention (MLA)  将 KV 值压缩映射到新空间，并在使用时恢复。
+3. Cross layer attention (CLA) 共享 KV 机制，下一层共享上一层的 KV 的值。
+
 ### MLP
 
 MLP 在推理的时候没有那么严重的问题，MLP 的运算强度是 $B \times T$ （详细推导参见原课程）
@@ -45,3 +51,16 @@ MLP 在推理的时候没有那么严重的问题，MLP 的运算强度是 $B \t
 
 1. prefill：可以通过扩大 batch 来增强运算强度。
 2. generation：每次生成一个 token，所以 $T=1$，另外 B 不可控，取决于用户的数量。
+
+### Trade-off
+
+batchsize 决定了 throughout 吞吐量，bs 越大吞吐量越大，但是相应的也会带来 TTFT 变慢，在 KV cache 构建时需要花费更长的时间，同时也会导致更多的内存占用。
+
+### Speculative sampling
+
+在上文中提到的一些优化大多是压缩 KV 的有损压缩，还有一种方法，Speculative sampling
+
+1. 先用一个 cheap 的模型来预测很多个 token
+2. 再用一个大模型来判断，并给出输出是否足够好
+
+这么做主要是 prefill 的时候可以并行化，但是 generation 的时候只能串行一个个下去，这么做就是把昂贵的大模型的输出改成可并行化的方式。
