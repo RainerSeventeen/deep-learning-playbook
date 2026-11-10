@@ -324,3 +324,97 @@ Consider a Transformer with $N$ identical blocks stacked sequentially. Without a
    Specifically, you will report a table that includes latencies for forward, backward, and the end-to-end forward-backward pass, for both your Triton and PyTorch implementations. Randomly generate any necessary inputs before you start benchmarking, and run the benchmark on a single B200. Always use batch size 1 and causal masking. Sweep over the cartesian product of sequence lengths of various powers of 2 from 128 up to 65536, embedding dimension sizes of various powers of 2 from 16 up to size 128, and precisions of `torch.bfloat16` and `torch.float32`. You will likely need to adjust tile sizes depending on the input sizes.
 
 > 详细代码参见具体 [作业文件](https://github.com/RainerSeventeen/deep-learning-playbook/blob/main/courses/gpt_from_scratch/91_assignment_2/cs336_systems/benchmark_flash_attention.py)
+
+## Distributed Data Parallel Training
+
+### Single-Node Distributed Communication in PyTorch
+
+1. Write a script to benchmark the runtime of the all-reduce operation in the single-node multi-process setup. The example code above may provide a reasonable starting point. Experiment with varying the following settings:
+
+   **all-reduce data size** float32 data tensors ranging over 1MB, 10MB, 100MB, 1GB.
+
+   **Number of GPUs/processes** 2, 4, or 6.
+
+   **Resource requirements**: Up to 6 GPUs. Each benchmarking run should take less than 5 minutes.
+
+> GPU 数量有限，仅测试了以下几条
+>
+> | GPU 数量 | 1 MB | 10 MB | 100 MB | 1000 MB |
+> | ---: | ---: | ---: | ---: | ---: |
+> | 2 | 0.514 | 0.896 | 10.527 | 105.899 |
+> | 3 | 0.467 | 1.115 | 11.738 | 117.245 |
+> | 4 | 1.015 | 1.535 | 13.408 | 148.352 |
+>
+
+### A Naïve Implementation of Distributed Data Parallel Training
+
+1. Implement a naïve form of distributed data parallel training that all-reduces individual parameter gradients after the backward pass. To test your implementation, implement [`adapters.get_ddp`] and (optionally) [`adapters.ddp_on_after_backward`] , then run `uv run pytest tests/test_ddp.py`.
+
+2. In this naïve DDP implementation, parameter gradients are individually all-reduced across ranks after each backward pass. To better understand the overhead of data parallel training, create a script to benchmark your previously-implemented language model when trained with this naïve implementation of DDP. Measure the total time per training step and the proportion of time spent on communicating gradients. Collect measurements in the single-node setting (1 node x 2 GPUs) for the xl model size described in Section 2.1.2.
+
+> 代码撰写完成，没有运行 GPU 测试
+
+### Improving Upon the Minimal DDP Implementation
+
+1. Modify your minimal DDP implementation to communicate a tensor with flattened gradients from all parameters. Compare its performance with the minimal DDP implementation that issues an all-reduce for each parameter tensor under the previously-used conditions.
+
+> 代码更新到了 `improved_ddp.py` 中
+
+2. Implement a Python class to handle distributed data parallel training. The class should wrap an arbitrary PyTorch `nn.Module` and take care of broadcasting the weights before training (so all ranks have the same initial parameters) and issuing communication calls for gradient averaging. We recommend the following public interface:
+
+   ```python
+   def __init__(self, module: torch.nn.Module):
+     # Given an instantiated PyTorch nn.Module to be parallelized, construct a DDP container that will handle gradient synchronization across ranks.
+   def forward(self, *inputs, **kwargs):
+     # Calls the wrapped module’s forward() method with the provided positional and keyword arguments.
+   def finish_gradient_synchronization(self): 
+     # When called, wait for asynchronous communication calls to finish on the GPU.
+   ```
+
+   To use this class to perform distributed training, we’ll pass it a module to wrap, and then add a call to `finish_gradient_synchronization()` before we run `optimizer.step()` to ensure that the optimizer step, an operation that depends on the gradients, can be safely queued:
+
+   ```python
+   model = ToyModel().to(device)
+   ddp_model = DDP(model)
+   for _ in range(train_steps):
+     x, y = get_batch()
+     logits = ddp_model(x)
+     loss = loss_fn(logits, y)
+     loss.backward()
+     ddp_model.finish_gradient_synchronization()
+     optimizer.step()
+   ```
+
+> [AsyncDDPModule](91_assignment_2/cs336_systems/improved_ddp.py) 初始化时从 rank 0 广播参数和 buffer，为每个 parameter 注册梯度累积完成后的 hook。backword 计算出 gradient 后，hook发起异步 all-reduce；调用 `finish_gradient_synchronization()` 时等待通信完成并求平均，然后才能执行优化器更新。
+
+## Optimizer State Sharding
+
+### Optimizer State Sharding 
+
+Implement a Python class to handle optimizer state sharding. The class should wrap an arbitrary input PyTorch `optim.Optimizer` and take care of synchronizing updated parameters after each optimizer step. We recommend the following public interface:
+
+```python
+def __init__(self, params, optimizer_cls: Type[Optimizer], **kwargs: Any): 
+  # Initializes the sharded state optimizer. params is a collection of parameters to be optimized (or parameter groups, in case the user wants to use different hyperparameters, such as learning rates, for different parts of the model); these parameters will be sharded across all the ranks. The optimizer_cls parameter specifies the type of optimizer to be wrapped (e.g., optim.AdamW). Finally, any remaining keyword arguments are forwarded to the constructor of the optimizer_cls. Make sure to call the torch.optim.Optimizer super-class constructor in this method.
+def step(self, closure, **kwargs): 
+  # Calls the wrapped optimizer’s step() method with the provided closure and keyword arguments. After updating the parameters, synchronize with the other ranks.
+def add_param_group(self, param_group: dict[str, Any]): 
+  # This method should add a parameter group to the sharded optimizer. This is called during construction of the sharded optimizer by the super-class constructor and may also be called during training (e.g., for gradually unfreezing layers in a model). As a result, this method should handle assigning the model’s parameters among the ranks.
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
