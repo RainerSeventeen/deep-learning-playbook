@@ -389,8 +389,6 @@ Consider a Transformer with $N$ identical blocks stacked sequentially. Without a
 
 ## Optimizer State Sharding
 
-### Optimizer State Sharding 
-
 Implement a Python class to handle optimizer state sharding. The class should wrap an arbitrary input PyTorch `optim.Optimizer` and take care of synchronizing updated parameters after each optimizer step. We recommend the following public interface:
 
 ```python
@@ -402,7 +400,7 @@ def add_param_group(self, param_group: dict[str, Any]):
   # This method should add a parameter group to the sharded optimizer. This is called during construction of the sharded optimizer by the super-class constructor and may also be called during training (e.g., for gradually unfreezing layers in a model). As a result, this method should handle assigning the model’s parameters among the ranks.
 ```
 
-
+> 详情参见代码。
 
 
 
