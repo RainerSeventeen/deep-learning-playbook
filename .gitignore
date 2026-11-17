@@ -34,6 +34,10 @@ env/
 .env
 .env.*
 
+# Local remote-training configuration and diagnostics
+.codex/remote.env
+scripts/remote/check.sh
+
 # ML generated artifacts at repo root
 /dataset/
 /logs/

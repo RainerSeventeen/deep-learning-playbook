@@ -23,20 +23,13 @@
 - Prefer small local checks or targeted script runs over broad test scaffolding unless the user explicitly asks for more.
 - Do not assume content under `references/` is part of the repository source of truth unless the task explicitly targets local reference materials.
 
-## Remote execution workflow
-- Use the remote workflow only when the user explicitly asks to run work on the remote server or when local execution is clearly unsuitable for a requested code experiment.
-- SSH configuration is read from `.env`; set `SSH_SERVER_NAME` there before remote work. `REMOTE_PROJECT_PATH` defaults to `/gpfs/yangsh/Code/deep-learning-playbook`.
-- Standard flow:
-  1. Edit files locally.
-  2. Sync with `bash scripts/remote/rsync.sh`.
-  3. Run remote commands directly:
-     ```bash
-     source .env
-     ssh "$SSH_SERVER_NAME" 'cd /gpfs/yangsh/Code/deep-learning-playbook && <command>'
-     ```
-- If `REMOTE_PROJECT_PATH` is set in `.env`, use that path instead of the default in direct SSH commands. Avoid operating outside the remote project directory unless the user explicitly asks.
-- Do not launch long training jobs, broad dataset generation, or destructive remote commands unless explicitly instructed. Prefer smoke tests or narrow checks by default.
-- Keep local secrets, virtual environments, references, datasets, logs, runs, and model checkpoints out of sync; the rsync script excludes them intentionally.
+## Remote training workflow
+- Use the remote workflow only when the user explicitly asks to run work on the remote server or local execution is unsuitable for the requested experiment.
+- `.codex/remote.env` is the local source for `REMOTE_SSH_ALIAS`, `REMOTE_PROJECT_PATH`, and any activation command. Do not put host credentials, passwords, or keys in tracked files.
+- Before the first sync or after changing configuration, run `bash scripts/remote/check.sh` to inspect the SSH target and CUDA environment.
+- Sync with `bash scripts/remote/rsync.sh`. It is one-way, does not use `--delete`, and excludes local configuration, environments, reference materials, datasets, logs, runs, and checkpoints.
+- Run commands with `source .codex/remote.env && ssh "$REMOTE_SSH_ALIAS" "cd \"$REMOTE_PROJECT_PATH\" && <command>"`. Do not work outside the configured remote directory unless explicitly requested.
+- Prefer small remote checks. Do not launch long training, large data generation, or destructive remote operations unless explicitly instructed.
 
 ## Boundary defaults
 - Treat generated artifacts, temporary files, and local editor metadata as non-source material unless the user explicitly asks to keep them.

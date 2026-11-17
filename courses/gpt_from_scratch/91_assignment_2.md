@@ -1,0 +1,418 @@
+# 第二次作业
+
+## Profiling and Benchmarking
+
+### End-to-End Benchmarking
+
+```bash
+uv run nsys profile \
+  -o profiles/small_s512_full \
+  --force-overwrite true \
+  --trace=cuda,cublas,cudnn,osrt,nvtx \
+  --capture-range=nvtx \
+  --nvtx-capture=profile \
+  --capture-range-end=stop \
+  python -m cs336_systems.benchmark
+```
+
+1. Time the forward, backward, and optimizer step for the model sizes described in Section 2.1.2. Use 5 warmup steps and compute the average and standard deviation of timings over 10 measurement steps. How long does a forward pass take? How about a backward pass? Do you see high variability across measurements, or is the standard deviation small?
+
+>```
+>small (cuda)
+>forward: mean=57.35ms, std=6.52ms (10 steps)
+>backward: mean=121.82ms, std=6.24ms (10 steps)
+>optimizer_step: mean=29.47ms, std=4.22ms (10 steps)
+>
+>medium (cuda)
+>forward: mean=157.20ms, std=13.26ms (10 steps)
+>backward: mean=335.99ms, std=29.09ms (10 steps)
+>optimizer_step: mean=81.49ms, std=7.75ms (10 steps)
+>```
+>
+>再大的就没有测了，因为 24GB 显存 OOM 了。backward 显然是最长消耗时间的。
+
+2. One caveat of benchmarking is not performing the warm-up steps. Repeat your analysis without the warm-up steps. How does this affect your results? Why do you think this happens? Also try to run the script with 1 or 2 warm-up steps. Why might the result still be different?
+
+>```
+>small (cuda)
+>forward: mean=88.83ms, std=100.26ms (10 steps)
+>backward: mean=131.66ms, std=30.68ms (10 steps)
+>optimizer_step: mean=28.27ms, std=4.31ms (10 steps)
+>
+>medium (cuda)
+>forward: mean=149.96ms, std=9.72ms (10 steps)
+>backward: mean=314.55ms, std=18.01ms (10 steps)
+>optimizer_step: mean=76.95ms, std=6.48ms (10 steps)
+>```
+>
+>不执行 warm up 的时候，在 small forward 时候会显著增加标准差，如果 warm up 2 个 step 则为下段，可以看到标准差已经显著降低了很多
+>
+>```
+>small (cuda)
+>forward: mean=47.13ms, std=455.31us (10 steps)
+>backward: mean=100.79ms, std=997.92us (10 steps)
+>optimizer_step: mean=23.46ms, std=46.50us (10 steps)
+>
+>medium (cuda)
+>forward: mean=143.33ms, std=433.79us (10 steps)
+>backward: mean=300.51ms, std=1.59ms (10 steps)
+>optimizer_step: mean=73.42ms, std=52.77us (10 steps)
+>```
+>
+>warm up 主要是为了 CUDA 运行时，显存分配与缓存建立，GPU 时钟升频等等。
+
+### Nsight Systems Profiler
+
+Nsight 是 NV 用来详细检测 GPU 运行情况的库
+
+![运行结果](http://oss.rainerseventeen.cn/blog/2026/202609191731162.png)
+
+1. What is the total time spent on your forward pass? Does it match what we had measured before with the Python standard library?
+
+>forward 中大致都是  48 ms（除了 step 2），和之前的保持一致
+
+2. What CUDA kernel takes the most cumulative GPU time during the forward pass? How many times is this kernel invoked during a single forward pass of your model? Is it the same kernel that takes the most runtime when you do both forward and backward passes? (Hint: look at the “CUDA GPU Kernel Summary” under “Stats System View”, and filter using NVTX ranges to identify which parts of the model are responsible for which kernels.)
+
+> ![](http://oss.rainerseventeen.cn/blog/2026/202609191750343.png)
+>
+> 选择 forward 区间并添加 filter，`ampere_sgemm_128x64_tn` 内核占用时间最长，这是一个矩阵运算 kernel，`ampere` 是安培架构（因为 GPU 用的是 3090），`sgemm` 是 Single precision (FP32) General Matrix Multiplication，`tn` 表示矩阵转置。
+>
+> 如果把 forward 和 backward 全算进去，同样这个 kernel 占用时间最长。
+
+3. Although the vast majority of FLOPs take place in matrix multiplications, you will notice that several other kernels still take a non-trivial amount of the overall runtime. What other kernels besides matrix multiplies do you see accounting for non-trivial CUDA runtime in the forward pass?
+
+>`BinaryFunctor ... MulFunctor<float>` 这一串就是非运算 kernel，用来向量访问内存。
+
+4. Profile running one complete training step with your implementation of AdamW (i.e., the forward pass, computing the loss and running a backward pass, and finally an optimizer step, as you’d do during training). How does the fraction of time spent on matrix multiplication change, compared to doing inference (forward pass only)? How about other kernels?
+
+> 在一个完整的训练步骤中 `ampere_sgemm_128x64_tn` 的占比是 9.1%，在 推理 forward 过程中占比为 32.6%。
+
+5. Compare the runtime of the softmax operation versus the matrix multiplication operations within the self-attention layer of your model during a forward pass. How does the difference in runtimes compare to the difference in FLOPs?
+
+> softmax 耗时 161 微秒，attention score 计算耗时 175 微秒。
+>
+> Attention 计算 $QK^T:(N\times d)(d\times N)$ 为 $2N^2d$ FLOPs，对 $N \times N$ softmax大约可以算作为 $N^2$。
+>
+> 在如此量级差距下，运算时间几乎相近，可能是由于 GPU 对大规模矩阵乘法的优化。
+
+### Mixed Precision
+
+1. Suppose we are training the model on a GPU and that the model parameters are originally in FP32. We’d like to use autocasting mixed precision with FP16. What are the data types of:（具体项目参见下方回答）
+
+> 1. the model parameters within the autocast context? 全都是 `torch.float32`
+> 2. the output of the first feed-forward layer (ToyModel.fc1)? `torch.float16`
+> 3. the output of layer norm (ToyModel.ln)? `torch.float16`
+> 4. the model’s predicted logits? `torch.float16`
+> 5. the loss? `torch.float16`
+> 6. the model’s gradients? 全都是 `torch.float32`
+
+2. You should have seen that FP16 mixed precision autocasting treats the layer normalization layer differently than the feed-forward layers. What parts of layer normalization are sensitive to mixed precision? If we use BF16 instead of FP16, do we still need to treat layer normalization differently? Why or why not?
+
+>实际上 autocast 没有自动上升到 FP32。但是 LN 中确实有对精度较为敏感的区域。
+>
+>LN 中计算 $\sigma^2=\frac1N\sum_i(x_i-\mu)^2$ 之后需要就算根号 $\hat x_i=\frac{x_i-\mu}{\sqrt{\sigma^2+\epsilon}}$ 这一步对精度要求高。
+>
+>LN 还是建议使用 FP32，即便 BF16 解决了动态范文，但是在计算累加过程中以及求均值时候，仍然会因为精度产生较大的误差。
+
+3. Modify your benchmarking script to optionally run the model using mixed precision with BF16. Time the forward and backward passes with and without mixed-precision for each language model size described in Section 2.1.2. Compare the results of using full precision versus mixed precision, and comment on any trends as model size changes. You may find the nullcontext no-op context manager to be useful.
+
+>```
+>fp32
+>  mode=full
+>forward: mean=577.90us, std=12.01us (50 steps)
+>backward: mean=1.24ms, std=32.97us (50 steps)
+>optimizer_step: mean=1.86ms, std=6.57us (50 steps)
+>
+>autocast-fp16
+>  mode=full
+>forward: mean=492.77us, std=23.81us (50 steps)
+>backward: mean=1.90ms, std=40.07us (50 steps)
+>optimizer_step: mean=2.31ms, std=29.88us (50 steps)
+>
+>autocast-bf16
+>  mode=full
+>forward: mean=497.18us, std=30.76us (50 steps)
+>backward: mean=1.76ms, std=43.16us (50 steps)
+>optimizer_step: mean=1.87ms, std=18.41us (50 steps)
+>```
+>
+>用混合精度在 Forward 上会有稍微的优势。在计算量比较小的时候 AMP 的收益比较有限，可能受到固定转化等成本影响。
+
+### Profiling Memory
+
+1. Add an option to your profiling script to run your model through the memory profiler.
+
+   It may be helpful to reuse some of your previous infrastructure (e.g., to activate mixed-precision, load specific model sizes, etc). Then, run your script to get a memory profile of the xl model when either doing inference only (just forward pass) or a full training step. What do your memory timelines look like? Can you tell which stage is running based on the peaks you see?
+
+>![](http://oss.rainerseventeen.cn/blog/2026/202609211356683.png)
+>
+>上图是训练全流程的大致图像长这样（显存不够，使用 medium 代替，后文同理），最大的峰值应该是 backward 开始了一段时间的时候，GPU 需要绝大多数的激活值来算 grad，还需要申请新 grad 的空间。
+>
+>![](http://oss.rainerseventeen.cn/blog/2026/202609211405344.png)
+>
+>上图是仅 forward 的时候的显存占用，可以明显看到大量的内存从头到尾一直存在，没有被释放过，主要是模型本身的参数。
+
+2. What is the peak memory usage of each context length when doing a forward pass? What about when doing a full training step?
+
+> 见上文
+
+3. Find the peak memory usage of the xl model when using mixed-precision, for both a forward pass and a full training step. Does mixed-precision significantly affect memory usage?
+
+> 大致降低了显存的占用（train 阶段相比全精度，显存峰值减少了约 2 GiB），总体趋势没有改变。
+
+4. Consider the xl model. Given our reference hyperparameters, what is the size of a tensor of activations in the Transformer residual stream, in single-precision? Give this size in MiB (i.e., divide the number of bytes by $1024^2$).
+
+> 运行中 batch size 是 4，medium 中残差形状：$[B,T,d_{\text{model}}]$，计算为 
+> $4\times512\times1024\times4
+> =8,388,608\text{ bytes}
+> =8\text{ MiB}.$
+
+5. Now look closely at the “Active Memory Timeline” from pytorch.org/memory_viz of a memory snapshot of the xl model doing a forward pass. When you reduce the “Detail” level, the tool hides the smallest allocations to the corresponding level (e.g., putting “Detail” at 10% only shows the 10% largest allocations). What is the size of the largest allocations shown? Looking through the stack trace, can you tell where those allocations come from?
+
+>medium 中最大的内存块为 64MiB，锁定那一块内存，并阅读 trace（从下往上读）：
+>
+>```
+>.../91_assignment_2/cs336-basics/cs336_basics/nn_utils.py:6:softmax
+>??:0:method_vectorcall.llvm.1911523193071396409
+>...91_assignment_2/cs336_systems/benchmark.py:41:annotated_scaled_dot_product_attention
+>??:0:method_vectorcall.llvm.1911523193071396409
+>...91_assignment_2/cs336-basics/cs336_basics/model.py:520:forward
+>```
+>
+>可以看到是缩放点积中的 softmax 运算。考虑到Attention 计算中的 Attention score 矩阵大小为：$[B,H,T,T]$
+>
+>$4\times16\times512\times512=16,777,216$ 个元素对应到 FP32 正好是 64 MiB
+
+## Single-GPU Memory
+
+本节主要关注 **Operation Fusion** 的收益，减少为了 backward 而保留的中间值，也能加快运算速度。进一步，在 attention block 中的 attention map 有非常大的显存占用，所以引入了 **Activation Checkpointing**，也就是不再保留中间值，而是重新再算一遍 forward，是计算量与存储之间的 trade off。
+
+checkpoint 越多，需要重计算的值越少，用于保存 input 的存储越多；checkpoint 越少，重计算的中间值越大，backward 的显存峰值会上升，但是保存的 input 会下降。两者之间会有一个中间点，使得显存值最小，构成最大化收益。以公式表达如下：
+$$
+M(K) = O\left(\frac{N}{K}+K\right)
+$$
+是一个经典的对钩函数。其中 $K$ 是 ckpt 数量，$O(K)$ 表示每一个 block 运算时候的 residual ，$O\left(\frac{N}{K}\right)$ 需要为 ckpt 保存的输入。
+
+进一步，checkpoint 内部可以构成递归形式，让一个 checkpoint 本身不用保存全部的 residual，代价就是更多的 recompute，更多的内容会被重复计算。
+
+Consider a Transformer with $N$ identical blocks stacked sequentially. Without any checkpointing, all $N$ blocks’ worth of residuals are kept alive simultaneously, giving $O(N)$ peak activation memory. We have a free hand to wrap any subset of the forward pass in checkpoint, including nesting checkpoint calls inside one another.
+
+1. What checkpointing strategy minimizes peak activation memory, ignoring the compute cost? Describe how you would arrange the checkpoint calls (a code sketch is fine), and give the asymptotic peak activation memory and compute of your strategy as a function of $N$. Assume the residuals saved by a single block dominate any per-checkpoint bookkeeping.
+
+>从复杂度的角度来算，如果不考虑计算量，最节约的是多重递归直到最小的单位。例如将 N 个 block 设置一个 ckpt，然后该块中进一步设置两个 ckpt，一直递归下去。
+>
+>空间复杂度： $S(N)=S(N/2)+O(1)$ 的递推式，总共有 $\log_2 N$ 个节点，求和就是 $O(\log N)$ 空间复杂度（峰值，因为算完即可释放）
+>
+>时间复杂度是累加的，不同于空间复杂度只需要考虑峰值，而且每一个节点都需要其下的所有节点的计算量，所以总共 $\log_2 N$，每个 $O(N)$ 计算量，总共为 $O(N\log N)$
+
+2. Consider the xl model config with batch size 4 and sequence length 2048 as above. If you only have the time/compute budget to run one step of recomputation (meaning you may not nest checkpoint calls), what is the best checkpointing strategy to reduce peak memory? Profile your run’s peak memory to validate your hypothesis. Compare the peak memory of the next smaller and larger checkpointing block sizes to be sure.
+
+> 显存不足，改用 medium 模型（24 层）、batch size 4、序列长度 512 测量。将相邻 block 均匀分组，每组使用一次 checkpoint，不嵌套。下表为 10 次训练步测量的平均值；显存数值是相对步前已分配显存的峰值增量，包含梯度等分配。
+>
+> | 每组 block 数 | 分组数 $K$ | 峰值显存增量 | 前向与反向耗时 |
+> | ---: | ---: | ---: | ---: |
+> | 不使用 checkpoint | — | 9.05 GiB | 457.69 ms |
+> | 3 | 8 | 2.63 GiB | 617.51 ms |
+> | 2 | 12 | 2.33 GiB | 614.67 ms |
+> | 1 | 24 | **2.03 GiB** | 602.49 ms |
+>
+> 在该配置的已测方案中，每层单独使用 checkpoint 的峰值显存增量最低。相邻的较大分组（每组 2 层）增加了 0.30 GiB
+
+## GPU Kernels
+
+### Optimizing Attention with FlashAttention-2
+
+1. Benchmark your attention implementation at different scales. Write a script that will:
+
+   - Fix the batch size to 8 and don’t use multihead attention (i.e. remove the head dimension).
+
+   - Iterate through the cartesian product of [16, 32, 64, 128] for the head embedding dimension $d$ model, and [256, 1024, 4096, 8192, 16384] for the sequence length.
+
+   - Create random inputs $Q, K, V$ for the appropriate size.
+
+   - Time 100 forward passes through attention using the inputs.
+
+   - Measure how much memory is in use before the backward pass starts, and time 100 backward passes.
+
+   - Make sure to warm up, and to call `torch.cuda.synchronize()` after each forward/backward pass.
+
+   Depending on your GPU, some of these configurations are expected to run out of memory. Report the timings (or out-of-memory errors) you get for these configurations. At what size do you get out-of-memory errors? Do the accounting for the memory usage of attention in one of the smallest configurations you find that runs out of memory (you can use the equations for memory usage of Transformers from Assignment 1). How does the memory saved for backward change with the sequence length? What would you do to eliminate this memory cost?
+
+> 在 NVIDIA GeForce RTX 4090 D（24 GiB）上使用 batch size 8、FP32 测量。每个 $d$ 仅列出未显存不足的最长序列（8192）；每组预热 5 次，表中耗时为随后 100 次测量的均值；显存为 PyTorch 已分配显存，单位 MiB。
+>
+> | $d$ | 序列长度 | 前向 (ms) | 反向 (ms) | 反向前显存 (MiB) | 峰值显存 (MiB) |
+> | ---: | ---: | ---: | ---: | ---: | ---: |
+> | 16 | 8192 | 28.70 | 71.80 | 4133.00 | 12329.00 |
+> | 32 | 8192 | 28.85 | 72.05 | 4153.00 | 12353.00 |
+> | 64 | 8192 | 28.96 | 72.42 | 4193.00 | 12401.00 |
+> | 128 | 8192 | 30.13 | 73.95 | 4273.00 | 12497.00 |
+>
+> 序列长度 16384 在所有 $d$ 下均显存不足。一个 $[8,16384,16384]$ 的 FP32 注意力矩阵占 $8\times16384^2\times4=8$ GiB；分数和 softmax 权重等中间结果会进一步占用显存。反向传播需保存的注意力权重随序列长度按 $O(T^2)$ 增长。可用分块计算并在反向时重算注意力权重，避免保存完整矩阵。
+>
+
+### Benchmarking JIT-Compiled Attention
+
+> 编译对比已合并到 [benchmark_flash_attention.py](91_assignment_2/cs336_systems/benchmark_flash_attention.py)，原 `flash_attention.py` 已移除。在作业目录运行：
+>
+> ```bash
+> python -m cs336_systems.benchmark_flash_attention --preset compiled --output attention_compiled.csv
+> ```
+>
+> `compiled` 配置沿用 batch size 8、FP32、无因果掩码、原序列长度列表，预热 5 次后测量 100 次，记录均值、标准差、反向前显存和峰值显存。合并后的脚本使用 `torch.autograd.grad` 计算梯度，不向输入的 `.grad` 累加；前后向合计耗时单独测量。可用 `--steps`、`--warmup-steps` 调整次数。
+
+
+#### `torch.compile`
+
+1. Extend your attention benchmarking script to include a compiled version of your PyTorch implementation of attention, and compare its performance to the uncompiled version with the same configuration as the pytorch_attention problem above. 
+
+>  NVIDIA GeForce RTX 4090 D（24 GiB）上，重新运行未编译版与 `torch.compile` 版。两者均使用 PyTorch 2.8.0+cu128、FP32、batch size 8、无多头维度；每个 $d$ 仅列出未显存不足的最长序列（8192）。每组以相同随机种子生成输入，预热 5 次后分别测量 100 次前向和反向，并在每次计时后同步 CUDA。下表为平均耗时，单位 ms；加速比为未编译耗时除以编译耗时，超过 1 表示编译版更快。编译过程发生在预热期间，不计入表中耗时。
+>
+> | $d$ | 序列长度 | 未编译前向 | 编译前向 | 前向加速比 | 未编译反向 | 编译反向 | 反向加速比 |
+> | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+> | 16 | 8192 | 28.70 | 10.63 | 2.70 | 71.80 | 30.21 | 2.38 |
+> | 32 | 8192 | 28.85 | 14.64 | 1.97 | 72.05 | 32.65 | 2.21 |
+> | 64 | 8192 | 28.96 | 10.57 | 2.74 | 72.42 | 30.69 | 2.36 |
+> | 128 | 8192 | 30.13 | 11.80 | 2.55 | 73.95 | 32.33 | 2.29 |
+>
+> 序列长度 16384 在所有 $d$ 下，两种版本均显存不足。在表中 8192 的配置下，编译版前向快 1.97～2.74 倍，反向快 2.21～2.38 倍。
+
+2. Now, compile your entire Transformer model in your end-to-end benchmarking script. How does the performance of the forward pass change? What about the combined forward and backward passes and optimizer steps?
+
+> 在 Autodl_cs336 的 RTX 4090 D 上使用 medium 模型（batch size 4、序列长度 512、FP32），分别运行未编译版和 `torch.compile` 版。两者使用相同随机种子，预热 5 步后测量 10 步。下表为平均耗时；合计不包括损失函数计算。
+>
+> | 阶段 | 未编译 (ms) | 编译 (ms) | 加速比 |
+> | --- | ---: | ---: | ---: |
+> | 前向 | 79.93 | 65.84 | 1.21 |
+> | 反向 | 163.89 | 118.73 | 1.38 |
+> | 前向与反向合计 | 243.82 | 184.57 | 1.32 |
+> | 参数更新 | 32.72 | 33.59 | 0.97 |
+> | 前向、反向与参数更新合计 | 276.53 | 218.16 | 1.27 |
+>
+> 前向耗时减少 14.09 ms（约 18%），前向与反向合计减少 59.25 ms（约 24%）。参数更新仍使用原来的 AdamW 实现，本次耗时增加 0.87 ms（约 3%）。三段合计减少 58.37 ms（约 21%），主要收益来自模型的前向和反向计算。
+
+#### Flash Attention
+
+1. Write a pure PyTorch (no Triton) `autograd.Function` that implements the FlashAttention-2 forward pass. This will be a lot slower than the regular PyTorch implementation, but will help you debug your Triton kernel.
+
+   Your implementation should take input $Q$, $K$, and $V$ as well as a flag `is_causal` and produce the output $O$ and the logsumexp value 𝐿. You can ignore the `is_causal` flag for this task. The `autograd.Function` forward should then save $L,Q,K,V,O$ for the backward pass and return $O$. Remember that the implementation of the `forward` method of `autograd.Function` always takes the context as its first parameter. Any `autograd.Function` class needs to implement a `backward` method, but for now you can make it just raise `NotImplementedError`. If you need something to compare against, you can implement Equation 4 to Equation 6 and Equation 12 in PyTorch and compare your outputs.
+
+   The interface is then `def forward(ctx, Q, K, V, is_causal=False)`. Determine your own tile sizes, but make sure they are at least of size $16 \times 16$. We will always test your code with dimensions that are powers of 2 and at least 16, so you don’t need to worry about out-of-bounds accesses.
+
+> Flash Attention 难点主要在于 Online Softmax，详细代码参见 repo
+
+2. Write a Triton kernel for the forward pass of FlashAttention-2 following Algorithm 1. Then, write another subclass of `torch.autograd.Function` that calls this (fused) kernel in the forward pass, instead of computing the result in PyTorch. A few problem-specific tips:
+
+   - To debug, we suggest comparing the results of each Triton operation you perform with the tiled PyTorch implementation you wrote in part (a).
+
+   - Your launch grid should be set as ($T_q$,batch_size), meaning each Triton program instance will load only elements from a single batch index, and only read/write to a single query tile of $Q$, $O$, and $L$.
+   - The kernel should only have a single loop, which will iterate key tiles $1 \leq j \leq T_k$.
+   - Advance block pointers at the end of the loop.
+
+   These additional guidelines may help you avoid precision issues:
+
+   - The on chip buffers $(O_i,l,m)$ should have `dtype tl.float32`. If you’re accumulating into an output buffer, use the `acc` argument `(acc = tl.dot(..., acc=acc))`.
+
+   1. Cast $\tilde{P}_i^{(j)}$ to the dtype of $V^{(𝑗)}$ before multiplying them, and cast $O_i$ to the appropriate `dtype` before writing it to global memory. Casting is done with `tensor.to`. You can get the dtype of a tensor with `tensor.dtype`, and the dtype of a block pointer/pointer with `*_block_ptr.type.element_ty`.
+
+
+3. Add a flag as the last argument to your `autograd.Function` implementation for causal masking. This should be a boolean flag that, when set to `True`, enables an index comparison for causal masking. Your Triton kernel should have a corresponding additional parameter `is_causal: tl.constexpr` (this is a required type annotation). In Triton, construct appropriate index vectors for queries and keys, and compare them to form a square mask of size $B_q \times B_k$. For elements that are masked out, add the constant value of `-1e6` to the corresponding elements of the attention score matrix $S_i^{(j)}$. Make sure to save the mask flag for backward using `ctx.is_causal = is_causal`.
+
+> 详细代码参见具体 [作业文件](https://github.com/RainerSeventeen/deep-learning-playbook/blob/main/courses/gpt_from_scratch/91_assignment_2/cs336_systems/flash_attention_core.py)
+
+4. Write a benchmarking script using `triton.testing.do_bench` that compares the performance of your (partially) Triton implementation of FlashAttention-2 forward and backward passes with a regular PyTorch implementation (i.e., not using FlashAttention).
+
+   Specifically, you will report a table that includes latencies for forward, backward, and the end-to-end forward-backward pass, for both your Triton and PyTorch implementations. Randomly generate any necessary inputs before you start benchmarking, and run the benchmark on a single B200. Always use batch size 1 and causal masking. Sweep over the cartesian product of sequence lengths of various powers of 2 from 128 up to 65536, embedding dimension sizes of various powers of 2 from 16 up to size 128, and precisions of `torch.bfloat16` and `torch.float32`. You will likely need to adjust tile sizes depending on the input sizes.
+
+> 详细代码参见具体 [作业文件](https://github.com/RainerSeventeen/deep-learning-playbook/blob/main/courses/gpt_from_scratch/91_assignment_2/cs336_systems/benchmark_flash_attention.py)
+
+## Distributed Data Parallel Training
+
+### Single-Node Distributed Communication in PyTorch
+
+1. Write a script to benchmark the runtime of the all-reduce operation in the single-node multi-process setup. The example code above may provide a reasonable starting point. Experiment with varying the following settings:
+
+   **all-reduce data size** float32 data tensors ranging over 1MB, 10MB, 100MB, 1GB.
+
+   **Number of GPUs/processes** 2, 4, or 6.
+
+   **Resource requirements**: Up to 6 GPUs. Each benchmarking run should take less than 5 minutes.
+
+> GPU 数量有限，仅测试了以下几条
+>
+> | GPU 数量 | 1 MB | 10 MB | 100 MB | 1000 MB |
+> | ---: | ---: | ---: | ---: | ---: |
+> | 2 | 0.514 | 0.896 | 10.527 | 105.899 |
+> | 3 | 0.467 | 1.115 | 11.738 | 117.245 |
+> | 4 | 1.015 | 1.535 | 13.408 | 148.352 |
+>
+
+### A Naïve Implementation of Distributed Data Parallel Training
+
+1. Implement a naïve form of distributed data parallel training that all-reduces individual parameter gradients after the backward pass. To test your implementation, implement [`adapters.get_ddp`] and (optionally) [`adapters.ddp_on_after_backward`] , then run `uv run pytest tests/test_ddp.py`.
+
+2. In this naïve DDP implementation, parameter gradients are individually all-reduced across ranks after each backward pass. To better understand the overhead of data parallel training, create a script to benchmark your previously-implemented language model when trained with this naïve implementation of DDP. Measure the total time per training step and the proportion of time spent on communicating gradients. Collect measurements in the single-node setting (1 node x 2 GPUs) for the xl model size described in Section 2.1.2.
+
+> 代码撰写完成，没有运行 GPU 测试
+
+### Improving Upon the Minimal DDP Implementation
+
+1. Modify your minimal DDP implementation to communicate a tensor with flattened gradients from all parameters. Compare its performance with the minimal DDP implementation that issues an all-reduce for each parameter tensor under the previously-used conditions.
+
+> 代码更新到了 `improved_ddp.py` 中
+
+2. Implement a Python class to handle distributed data parallel training. The class should wrap an arbitrary PyTorch `nn.Module` and take care of broadcasting the weights before training (so all ranks have the same initial parameters) and issuing communication calls for gradient averaging. We recommend the following public interface:
+
+   ```python
+   def __init__(self, module: torch.nn.Module):
+     # Given an instantiated PyTorch nn.Module to be parallelized, construct a DDP container that will handle gradient synchronization across ranks.
+   def forward(self, *inputs, **kwargs):
+     # Calls the wrapped module’s forward() method with the provided positional and keyword arguments.
+   def finish_gradient_synchronization(self): 
+     # When called, wait for asynchronous communication calls to finish on the GPU.
+   ```
+
+   To use this class to perform distributed training, we’ll pass it a module to wrap, and then add a call to `finish_gradient_synchronization()` before we run `optimizer.step()` to ensure that the optimizer step, an operation that depends on the gradients, can be safely queued:
+
+   ```python
+   model = ToyModel().to(device)
+   ddp_model = DDP(model)
+   for _ in range(train_steps):
+     x, y = get_batch()
+     logits = ddp_model(x)
+     loss = loss_fn(logits, y)
+     loss.backward()
+     ddp_model.finish_gradient_synchronization()
+     optimizer.step()
+   ```
+
+> [AsyncDDPModule](91_assignment_2/cs336_systems/improved_ddp.py) 初始化时从 rank 0 广播参数和 buffer，为每个 parameter 注册梯度累积完成后的 hook。backword 计算出 gradient 后，hook发起异步 all-reduce；调用 `finish_gradient_synchronization()` 时等待通信完成并求平均，然后才能执行优化器更新。
+
+## Optimizer State Sharding
+
+Implement a Python class to handle optimizer state sharding. The class should wrap an arbitrary input PyTorch `optim.Optimizer` and take care of synchronizing updated parameters after each optimizer step. We recommend the following public interface:
+
+```python
+def __init__(self, params, optimizer_cls: Type[Optimizer], **kwargs: Any): 
+  # Initializes the sharded state optimizer. params is a collection of parameters to be optimized (or parameter groups, in case the user wants to use different hyperparameters, such as learning rates, for different parts of the model); these parameters will be sharded across all the ranks. The optimizer_cls parameter specifies the type of optimizer to be wrapped (e.g., optim.AdamW). Finally, any remaining keyword arguments are forwarded to the constructor of the optimizer_cls. Make sure to call the torch.optim.Optimizer super-class constructor in this method.
+def step(self, closure, **kwargs): 
+  # Calls the wrapped optimizer’s step() method with the provided closure and keyword arguments. After updating the parameters, synchronize with the other ranks.
+def add_param_group(self, param_group: dict[str, Any]): 
+  # This method should add a parameter group to the sharded optimizer. This is called during construction of the sharded optimizer by the super-class constructor and may also be called during training (e.g., for gradually unfreezing layers in a model). As a result, this method should handle assigning the model’s parameters among the ranks.
+```
+
+> 详情参见代码。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

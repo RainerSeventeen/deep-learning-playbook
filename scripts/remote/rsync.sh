@@ -4,17 +4,11 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-if [[ -f "$REPO_ROOT/.env" ]]; then
-  source "$REPO_ROOT/.env"
-fi
-
-if [[ -z "${SSH_SERVER_NAME:-}" ]]; then
-  echo "ERROR: SSH_SERVER_NAME is not set. Define it in .env or the environment." >&2
-  exit 1
-fi
-
-REMOTE_PROJECT_PATH="${REMOTE_PROJECT_PATH:-/gpfs/yangsh/Code/deep-learning-playbook}"
-REMOTE_PATH="${SSH_SERVER_NAME}:${REMOTE_PROJECT_PATH%/}/"
+# shellcheck source=/dev/null
+source "$REPO_ROOT/.codex/remote.env"
+: "${REMOTE_SSH_ALIAS:?Set REMOTE_SSH_ALIAS in .codex/remote.env}"
+: "${REMOTE_PROJECT_PATH:?Set REMOTE_PROJECT_PATH in .codex/remote.env}"
+REMOTE_PATH="${REMOTE_SSH_ALIAS}:${REMOTE_PROJECT_PATH%/}/"
 
 cd "$REPO_ROOT"
 
@@ -24,6 +18,7 @@ if rsync -avzP \
   --exclude '*.pyc' \
   --exclude '.env' \
   --exclude '.env.*' \
+  --exclude '.codex/remote.env' \
   --exclude '.venv/' \
   --exclude 'venv/' \
   --exclude 'env/' \
